@@ -318,11 +318,47 @@ async def handle_proactive_cmd(event: PrivateMessageEvent):
     await proactive_cmd.finish(f"私聊主动对话已{'开启' if enable else '关闭'}。")
 
 
+# ──────────────────── /listen 群全量上下文切换（私聊） ────────────────────
+listen_cmd_private = on_message(
+    rule=Rule(is_private_event) & startswith("/listen"),
+    priority=10, block=True,
+)
+
+
+@listen_cmd_private.handle()
+async def handle_listen_private(event: PrivateMessageEvent):
+    user_id = str(event.user_id)
+    if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
+        return  # 非管理员直接忽略
+
+    text = event.get_plaintext().strip()
+    args = text[len("/listen"):].strip().split()
+    if not args or not args[0].isdigit():
+        await listen_cmd_private.finish("用法: /listen <群号> [on|off]")
+
+    from ..persona.manager import get_listen_all, set_listen_all
+    target_gid = args[0]
+    arg = args[1].lower() if len(args) > 1 else None
+    if arg in ("on", "开"):
+        enable = True
+    elif arg in ("off", "关"):
+        enable = False
+    elif arg is None:
+        enable = not get_listen_all(target_gid)
+    else:
+        await listen_cmd_private.finish("用法: /listen <群号> [on|off]")
+
+    set_listen_all(target_gid, enable)
+    state = "已开启：回复 @Bot 时加载全量群聊上下文。" if enable else "已关闭：仅记录 @Bot 消息。"
+    await listen_cmd_private.finish(f"群 {target_gid} 的{state}")
+
+
 # ──────────────────── /help ────────────────────
 PRIVATE_HELP = """/reset — 清除对话历史
 /compact — 压缩对话历史（自动提取记忆）
 /主动对话 enable|disable — 切换私聊主动对话（Bot 空闲时主动发消息）
 /主动对话 <群号> enable|disable — 切换指定群的主动对话
+/listen <群号> [on|off] — 切换指定群的全量上下文模式
 /白名单 list|add <群号>|delete <群号> — 管理群白名单
 /help — 显示本帮助"""
 
