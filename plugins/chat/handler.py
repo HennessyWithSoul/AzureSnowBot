@@ -534,6 +534,14 @@ async def handle_chat(event: PrivateMessageEvent):
                     reset_idle_timer("private")
                 return
 
+            # 同轮"说话 + 调工具"：文字先发给用户，再执行工具调用
+            # （原实现会丢弃与 tool_calls 同现的 content）
+            prelude = (assistant_msg.get("content") or "").strip()
+            if prelude:
+                append_message(user_id, {"role": "assistant", "content": prelude})
+                bot = get_bot()
+                await send_chunked(bot, event, chunk_text(prelude), reply_first=False)
+
             # 处理工具调用
             messages.append(assistant_msg)
             logger.info(f"私聊 LLM 请求工具调用 (round {round_idx + 1}): "

@@ -210,6 +210,15 @@ async def _handle_group_chat(
                         reset_group_proactive_timer(f"group:{group_id}")
                 return
 
+            # 模型可以在同一次回复里既输出文字又调用工具：
+            # 文字（"我来查一下…"）先发给用户，再继续执行工具调用。
+            # 原本这段文字会被直接丢弃（不进历史、不发消息）。
+            prelude = (assistant_msg.get("content") or "").strip()
+            if prelude:
+                append_message(group_id, {"role": "assistant", "content": prelude}, active_persona)
+                bot = get_bot()
+                await send_chunked(bot, event, chunk_text(prelude))
+
             messages.append(assistant_msg)
             logger.info(f"LLM 请求工具调用 (round {round_idx + 1}): "
                         f"{[tc['function']['name'] for tc in tool_calls]}")
