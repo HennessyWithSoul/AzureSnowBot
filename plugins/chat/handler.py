@@ -275,6 +275,30 @@ async def handle_proactive_cmd(event: PrivateMessageEvent):
     if not text.startswith("/主动对话"):
         return
 
+    # 解析参数: /主动对话 [群号] enable|disable（带群号 = 切换该群的主动对话）
+    args = text[len("/主动对话"):].strip().split()
+    if args and args[0].isdigit():
+        target_gid = args[0]
+        action = args[1].lower() if len(args) > 1 else None
+
+        from ..persona.manager import get_group_proactive, set_group_proactive
+        if action in ("enable", "on", "开"):
+            enable = True
+        elif action in ("disable", "off", "关"):
+            enable = False
+        elif action is None:
+            enable = not get_group_proactive(target_gid)
+        else:
+            await proactive_cmd.finish("用法: /主动对话 <群号> enable|disable")
+
+        set_group_proactive(target_gid, enable)
+        if enable:
+            reset_idle_timer(f"group:{target_gid}")
+        else:
+            cancel_idle_timer(f"group:{target_gid}")
+        await proactive_cmd.finish(f"群 {target_gid} 的主动对话已{'开启' if enable else '关闭'}。")
+
+    # 私聊模式
     arg = text[len("/主动对话"):].strip().lower()
     if arg in ("enable", "on", "开"):
         enable = True
@@ -296,7 +320,9 @@ async def handle_proactive_cmd(event: PrivateMessageEvent):
 # ──────────────────── /help ────────────────────
 PRIVATE_HELP = """/reset — 清除对话历史
 /compact — 压缩对话历史（自动提取记忆）
-/主动对话 enable|disable — 切换主动对话（Bot 空闲时主动发消息）
+/主动对话 enable|disable — 切换私聊主动对话（Bot 空闲时主动发消息）
+/主动对话 <群号> enable|disable — 切换指定群的主动对话
+/白名单 list|add <群号>|delete <群号> — 管理群白名单
 /help — 显示本帮助"""
 
 help_cmd = on_fullmatch("/help", rule=is_private_event, priority=10, block=True)
