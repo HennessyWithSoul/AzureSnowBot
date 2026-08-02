@@ -5,9 +5,11 @@
 """
 
 import re
+import httpx
 from nonebot import on_fullmatch, on_message
 from nonebot.rule import startswith, Rule
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
+from nonebot.exception import FinishedException
 from nonebot.log import logger
 
 from ..persona.manager import clear_history as pm_clear_history
@@ -15,10 +17,12 @@ from ..persona.manager import (
     get_active_persona, _session_path as persona_session_path,
     get_listen_all, set_listen_all,
     get_group_proactive, set_group_proactive,
+    load_persona_prompt, get_group_config, group_memory_path,
 )
 from ..mcp.manager import list_tools_summary
 from ..skill.manager import list_skills_summary
 from ..local_tools.manager import list_tools_summary as local_tools_summary
+from ..runtime_context import build_runtime_context
 from .utils import in_whitelist, is_at_bot, is_group_event
 
 # ──────────────────── /reset ────────────────────
@@ -47,12 +51,11 @@ async def handle_group_compact(event: GroupMessageEvent):
     if not is_at_bot(event):
         return
     from ..chat.compaction import compact_history
-    from pathlib import Path
 
     group_id = str(event.group_id)
     persona = get_active_persona(group_id)
     session_path = persona_session_path(group_id, persona)
-    memory_path = Path(f"data/sessions/groups/{group_id}/MEMORY.md")
+    memory_path = group_memory_path(group_id)  # data/groups/<群号>/MEMORY.md
     compacted = await compact_history(group_id, session_path, memory_path)
     if compacted:
         await group_compact.finish("本群对话历史已压缩。")
@@ -261,6 +264,76 @@ async def handle_nickname(event: GroupMessageEvent):
     await send_chunked(bot, event, chunks)
 
 
+# ──────────────────── /塔罗 塔罗占卜 ────────────────────
+tarot_cmd = on_message(rule=Rule(is_group_event) & startswith("/塔罗") & Rule(is_at_bot), priority=9, block=True)
+
+
+@tarot_cmd.handle()
+async def handle_tarot(event: GroupMessageEvent):
+    if not in_whitelist(event.group_id):
+        return
+    if not is_at_bot(event):
+        return
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/塔罗"):
+        return
+
+    from ..local_tools.tarot import (
+        parse_tarot_args, draw_cards, format_cards, interpret_cards,
+    )
+
+    num, question = parse_tarot_args(text)
+    if num == 0:
+        await tarot_cmd.finish(
+            MessageSegment.reply(event.message_id)
+            + "牌数需要是 1-5 之间的数字，例如：/塔罗 3 我明天能升职吗"
+        )
+
+    cards = draw_cards(num)
+
+    # 第一步：先发牌面
+    from nonebot import get_bot
+    from ..chunker import chunk_text, send_chunked
+    bot = get_bot()
+    await send_chunked(bot, event, chunk_text(format_cards(cards) + "\n我来帮你解读一下~"))
+
+    # 第二步：人格 + 运行时上下文 → LLM 解读
+    group_id = str(event.group_id)
+    active_persona = get_active_persona(group_id)
+    system_prompt = load_persona_prompt(active_persona, group_id)
+    if not system_prompt:
+        system_prompt = "你是一个有用的助手，请用中文回答用户的问题。"
+    cfg = get_group_config(group_id)
+    system_prompt += build_runtime_context(
+        chat_type="group", last_message_at=cfg.get("last_message_at", "")
+    )
+
+    asker = event.sender.nickname or str(event.user_id)
+    try:
+        reply = await interpret_cards(system_prompt, cards, question, asker)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"塔罗解读 API 错误: {e.response.status_code} {e.response.text}")
+        await tarot_cmd.finish(
+            MessageSegment.reply(event.message_id)
+            + f"牌已经抽好了，但解读服务暂时不可用（{e.response.status_code}），稍后再试~"
+        )
+    except FinishedException:
+        raise
+    except Exception as e:
+        logger.error(f"塔罗解读异常: {e}")
+        await tarot_cmd.finish(
+            MessageSegment.reply(event.message_id) + "牌已经抽好了，但解读时出了点问题，稍后再试~"
+        )
+
+    if reply:
+        await send_chunked(bot, event, chunk_text(reply), reply_first=False)
+    else:
+        await tarot_cmd.finish(
+            MessageSegment.reply(event.message_id) + "嗯……我好像走神了，让我再看一眼牌面。"
+        )
+
+
 # ──────────────────── /help ────────────────────
 HELP_TEXT = """/persona — 列出所有人格
 /persona <名称> — 切换人格
@@ -273,6 +346,7 @@ HELP_TEXT = """/persona — 列出所有人格
 /skill reload — 重新扫描技能
 /compact — 压缩对话历史
 /取名 @某人 [条数] — 根据聊天记录起群昵称
+/塔罗 [牌数1-5] [问题] — 塔罗占卜（抽牌并解读）
 /reset — 清除当前对话历史
 /listen [on|off] — 切换全量上下文模式：开启后 @Bot 回复加载全量群聊消息（仅管理员）
 /主动对话 [群号] enable|disable — 切换群的主动对话（仅管理员）

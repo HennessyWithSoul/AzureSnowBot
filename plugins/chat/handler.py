@@ -353,9 +353,66 @@ async def handle_listen_private(event: PrivateMessageEvent):
     await listen_cmd_private.finish(f"群 {target_gid} 的{state}")
 
 
+# ──────────────────── /塔罗 塔罗占卜（私聊） ────────────────────
+tarot_cmd = on_message(rule=Rule(is_private_event) & startswith("/塔罗"), priority=10, block=True)
+
+
+@tarot_cmd.handle()
+async def handle_tarot_private(event: PrivateMessageEvent):
+    user_id = str(event.user_id)
+    if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
+        return  # 非管理员忽略，落回主聊天 handler
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/塔罗"):
+        return
+
+    from ..local_tools.tarot import (
+        parse_tarot_args, draw_cards, format_cards, interpret_cards,
+    )
+
+    num, question = parse_tarot_args(text)
+    if num == 0:
+        await tarot_cmd.finish("牌数需要是 1-5 之间的数字，例如：/塔罗 3 我明天能升职吗")
+
+    cards = draw_cards(num)
+
+    # 第一步：先发牌面
+    bot = get_bot()
+    await send_chunked(bot, event, chunk_text(format_cards(cards) + "\n我来帮你解读一下~"))
+
+    # 第二步：Admin 人格 + 运行时上下文 → LLM 解读（与主 handler 同拼法）
+    system_prompt = load_admin_prompt() or _FALLBACK_PROMPT
+    cfg = _load_config(user_id)
+    system_prompt += build_runtime_context(
+        chat_type="private", last_message_at=cfg.get("last_message_at", "")
+    )
+
+    asker = getattr(event, "sender", None)
+    asker = getattr(asker, "nickname", None) or str(event.user_id)
+    try:
+        reply = await interpret_cards(system_prompt, cards, question, asker)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"塔罗解读 API 错误: {e.response.status_code} {e.response.text}")
+        await tarot_cmd.finish(
+            f"牌已经抽好了，但解读服务暂时不可用（{e.response.status_code}），稍后再试~"
+        )
+    except FinishedException:
+        raise
+    except Exception as e:
+        logger.error(f"塔罗解读异常: {e}")
+        await tarot_cmd.finish("牌已经抽好了，但解读时出了点问题，稍后再试~")
+
+    if reply:
+        await send_chunked(bot, event, chunk_text(reply), reply_first=False)
+    else:
+        await tarot_cmd.finish("嗯……我好像走神了，让我再看一眼牌面。")
+
+
 # ──────────────────── /help ────────────────────
 PRIVATE_HELP = """/reset — 清除对话历史
 /compact — 压缩对话历史（自动提取记忆）
+/塔罗 [牌数1-5] [问题] — 塔罗占卜（抽牌并解读）
 /主动对话 enable|disable — 切换私聊主动对话（Bot 空闲时主动发消息）
 /主动对话 <群号> enable|disable — 切换指定群的主动对话
 /listen <群号> [on|off] — 切换指定群的全量上下文模式
