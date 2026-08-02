@@ -19,8 +19,6 @@ from ..persona.manager import (
     get_group_proactive, set_group_proactive,
     load_persona_prompt, get_group_config, group_memory_path,
 )
-from ..mcp.manager import list_tools_summary
-from ..local_tools.manager import list_tools_summary as local_tools_summary
 from ..runtime_context import build_runtime_context
 from .utils import in_whitelist, is_at_bot, is_group_event
 
@@ -362,15 +360,7 @@ async def handle_help(event: GroupMessageEvent):
     if not is_at_bot(event):
         return
 
-    text = HELP_TEXT
-    tool_lines = list_tools_summary()
-    if tool_lines:
-        text += "\n\n可用工具（由 MCP 提供，模型自动调用）：\n" + "\n".join(tool_lines)
-    # 群聊 /help 不展示技能列表（太长），技能由模型在对话中按需加载
-    local_lines = local_tools_summary()
-    if local_lines:
-        text += "\n\n本地工具（模型自动调用）：\n" + "\n".join(local_lines)
-
+    # 群聊 /help 只展示命令列表：工具/技能由模型在对话中按需调用，不展示（太长）
     await help_cmd.finish(
-        MessageSegment.reply(event.message_id) + text
+        MessageSegment.reply(event.message_id) + HELP_TEXT
     )
