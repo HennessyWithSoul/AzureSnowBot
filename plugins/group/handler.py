@@ -22,6 +22,7 @@ from ..persona.manager import (
     get_active_persona, load_persona_prompt,
     load_history, append_message, get_group_config,
     get_listen_all, get_group_proactive,
+    load_group_memory, group_memory_path,
     _session_path as persona_session_path,
 )
 from ..mcp.manager import get_openai_tools, call_tool, MAX_TOOL_ROUNDS
@@ -105,6 +106,11 @@ async def _handle_group_chat(
         logger.warning(f"群 {group_id} 人格 {active_persona} 的 prompt 文件不存在，跳过响应")
         return
 
+    # 注入本群长期记忆（data/groups/<群号>/MEMORY.md，compaction/工具写入）
+    group_memory = load_group_memory(group_id)
+    if group_memory:
+        system_prompt += "\n\n" + group_memory
+
     # 注入 Skill 目录（Level 1 渐进式披露）
     skill_catalog = skill_catalog_prompt(chat_type="group")
     if skill_catalog:
@@ -149,11 +155,11 @@ async def _handle_group_chat(
     history = load_history(group_id, active_persona)
 
     # Compaction: 如果历史 token 过多，压缩旧消息为摘要 + 提取记忆
+    # 提取的记忆写入 data/groups/<群号>/MEMORY.md（与群聊记忆工具共用同一文件）
     from ..chat.compaction import compact_history, should_compact
     if should_compact(history):
-        from pathlib import Path
         session_path = persona_session_path(group_id, active_persona)
-        memory_path = Path(f"data/sessions/groups/{group_id}/MEMORY.md")
+        memory_path = group_memory_path(group_id)
         compacted = await compact_history(group_id, session_path, memory_path)
         if compacted:
             history = load_history(group_id, active_persona)

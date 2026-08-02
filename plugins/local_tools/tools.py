@@ -18,36 +18,74 @@ from nonebot.log import logger
 from .manager import register_tool
 
 # ──────────────────────────────────────────────────────
-# Admin 文件系统工具（仅 Admin 私聊可用）
+# 文件系统工具（私聊 Admin 限定，群聊限定本群目录）
 # ──────────────────────────────────────────────────────
 
-# 允许操作的目录白名单（相对于项目根目录）
+# 私聊允许操作的目录白名单（相对于项目根目录）
 _ALLOWED_ROOTS = [
     Path("data/admin"),
     Path("data/skills"),
     Path("data/personas"),
 ]
 
+# 群聊记忆根目录：data/groups/<群号>/
+GROUP_MEMORY_ROOT = Path("data/groups")
 
-def _check_admin_only(context: dict | None) -> str | None:
-    """校验是否 Admin 私聊，返回错误信息或 None"""
+
+def _check_scope(context: dict | None) -> tuple[str, str | None]:
+    """校验工具调用场景，返回 (chat_type, error_msg)。
+
+    私聊和群聊都可以使用文件工具（范围不同）：
+      - private → 私聊白名单目录
+      - group   → 仅本群 data/groups/<群号>/ 目录
+    """
+    if not context:
+        return "", "[错误] 此工具仅限私聊或群聊使用"
+    chat_type = context.get("_chat_type")
+    if chat_type not in ("private", "group"):
+        return "", "[错误] 此工具仅限私聊或群聊使用"
+    return chat_type, None
+
+
+def _check_private_only(context: dict | None) -> str | None:
+    """校验是否 Admin 私聊场景，返回错误信息或 None（用于 run_command 等敏感工具）"""
     if not context or context.get("_chat_type") != "private":
         return "[错误] 此工具仅限 Admin 私聊使用"
     return None
 
 
-def _resolve_safe_path(filepath: str) -> tuple[Path, str | None]:
+def _scope_roots(chat_type: str, context: dict | None) -> tuple[list[Path], str | None]:
+    """根据场景返回允许的根目录列表，返回 (roots, error_msg)"""
+    if chat_type == "private":
+        return list(_ALLOWED_ROOTS), None
+
+    # 群聊：仅本群记忆目录（群号必须是纯数字，防止路径注入）
+    group_id = str((context or {}).get("_target_id", ""))
+    if not group_id or not group_id.isdigit():
+        return [], f"[错误] 无效的群号: {group_id or '空'}"
+    return [GROUP_MEMORY_ROOT / group_id], None
+
+
+def _resolve_safe_path(filepath: str, context: dict | None = None) -> tuple[Path, str | None]:
     """
-    解析文件路径并检查是否在白名单目录内。
+    解析文件路径并检查是否在允许目录内（按场景动态决定）。
     返回 (resolved_path, error_msg)，error_msg 为 None 表示安全。
     """
+    chat_type, err = _check_scope(context)
+    if err:
+        return Path(), err
+
+    roots, err = _scope_roots(chat_type, context)
+    if err:
+        return Path(), err
+
     try:
         target = Path(filepath).resolve()
     except Exception:
         return Path(), f"[错误] 无效路径: {filepath}"
 
-    # 检查是否在白名单目录内
-    for allowed in _ALLOWED_ROOTS:
+    # 检查是否在允许目录内
+    for allowed in roots:
         allowed_abs = allowed.resolve()
         try:
             target.relative_to(allowed_abs)
@@ -55,23 +93,24 @@ def _resolve_safe_path(filepath: str) -> tuple[Path, str | None]:
         except ValueError:
             continue
 
-    allowed_str = ", ".join(str(r) for r in _ALLOWED_ROOTS)
+    allowed_str = ", ".join(str(r) for r in roots)
     return target, f"[错误] 路径不在允许范围内。允许的目录: {allowed_str}"
 
 
 @register_tool(
     name="read_file",
     description=(
-        "读取指定文件的内容。路径相对于项目根目录，仅限 data/admin/、data/skills/、data/personas/ 目录。"
-        "用途：查看 MEMORY.md、USER.md 等上下文文件的当前内容。"
+        "读取指定文件的内容。路径相对于项目根目录。"
+        "私聊：仅限 data/admin/、data/skills/、data/personas/ 目录（查看 MEMORY.md、USER.md 等）。"
+        "群聊：仅限 data/groups/<当前群号>/ 目录（查看本群长期记忆 MEMORY.md）。"
+        "用途：查看记忆文件的当前内容。"
     ),
-    admin_only=True,
     parameters={
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "文件路径（相对于项目根），例如: data/admin/MEMORY.md",
+                "description": "文件路径（相对于项目根），例如: data/admin/MEMORY.md 或 data/groups/123456/MEMORY.md",
             },
         },
         "required": ["path"],
@@ -82,13 +121,13 @@ async def read_file_tool(
     _context: dict | None = None,
     **kwargs,
 ) -> str:
-    err = _check_admin_only(_context)
+    chat_type, err = _check_scope(_context)
     if err:
         return err
     if not path:
         return "[错误] 请提供文件路径"
 
-    target, err = _resolve_safe_path(path)
+    target, err = _resolve_safe_path(path, _context)
     if err:
         return err
     if not target.exists():
@@ -108,17 +147,17 @@ async def read_file_tool(
 @register_tool(
     name="write_file",
     description=(
-        "写入内容到指定文件（覆盖写入）。路径相对于项目根目录，仅限 data/admin/、data/skills/、data/personas/ 目录。"
-        "用途：更新 MEMORY.md（写入长期记忆）、修改 USER.md（更新用户档案）等。"
+        "写入内容到指定文件（覆盖写入）。路径相对于项目根目录。"
+        "私聊：仅限 data/admin/、data/skills/、data/personas/ 目录（更新 MEMORY.md 长期记忆、USER.md 用户档案等）。"
+        "群聊：仅限 data/groups/<当前群号>/ 目录（写本群长期记忆 MEMORY.md）。"
         "注意：会覆盖文件全部内容，写入前建议先 read_file 查看当前内容。"
     ),
-    admin_only=True,
     parameters={
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "文件路径（相对于项目根），例如: data/admin/MEMORY.md",
+                "description": "文件路径（相对于项目根），例如: data/admin/MEMORY.md 或 data/groups/123456/MEMORY.md",
             },
             "content": {
                 "type": "string",
@@ -134,13 +173,13 @@ async def write_file_tool(
     _context: dict | None = None,
     **kwargs,
 ) -> str:
-    err = _check_admin_only(_context)
+    chat_type, err = _check_scope(_context)
     if err:
         return err
     if not path:
         return "[错误] 请提供文件路径"
 
-    target, err = _resolve_safe_path(path)
+    target, err = _resolve_safe_path(path, _context)
     if err:
         return err
 
@@ -155,15 +194,16 @@ async def write_file_tool(
 @register_tool(
     name="list_files",
     description=(
-        "列出指定目录下的文件和子目录。路径相对于项目根目录，仅限 data/admin/、data/skills/、data/personas/ 目录。"
+        "列出指定目录下的文件和子目录。路径相对于项目根目录。"
+        "私聊：仅限 data/admin/、data/skills/、data/personas/ 目录。"
+        "群聊：仅限 data/groups/<当前群号>/ 目录（本群记忆目录）。"
     ),
-    admin_only=True,
     parameters={
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "目录路径（相对于项目根），例如: data/admin",
+                "description": "目录路径（相对于项目根），例如: data/admin 或 data/groups/123456",
             },
         },
         "required": ["path"],
@@ -174,13 +214,13 @@ async def list_files_tool(
     _context: dict | None = None,
     **kwargs,
 ) -> str:
-    err = _check_admin_only(_context)
+    chat_type, err = _check_scope(_context)
     if err:
         return err
     if not path:
         return "[错误] 请提供目录路径"
 
-    target, err = _resolve_safe_path(path)
+    target, err = _resolve_safe_path(path, _context)
     if err:
         return err
     if not target.exists():
@@ -241,7 +281,7 @@ async def run_command_tool(
     import asyncio
     import platform
 
-    err = _check_admin_only(_context)
+    err = _check_private_only(_context)
     if err:
         return err
     if not command:
@@ -1011,9 +1051,8 @@ async def web_search_tool(query: str = "", num_results: int = 5, auto_read: bool
     description=(
         "语义搜索长期记忆和历史对话。"
         "当需要回忆之前聊过的内容、查找用户偏好、回顾过去的决定或约定时使用。"
-        "同时搜索自由文本记忆和结构化知识库，返回最相关的结果。"
+        "私聊：搜索 Admin 长期记忆和历史；群聊：搜索本群长期记忆（data/groups/<群号>/）和本群会话历史。"
     ),
-    admin_only=True,
     parameters={
         "type": "object",
         "properties": {
@@ -1027,7 +1066,7 @@ async def web_search_tool(query: str = "", num_results: int = 5, auto_read: bool
             },
             "type_filter": {
                 "type": "string",
-                "description": "按类型过滤结构化记忆，可选: identity/preference/fact/task/emotion，留空搜全部",
+                "description": "按类型过滤结构化记忆（仅私聊），可选: identity/preference/fact/task/emotion，留空搜全部",
             },
         },
         "required": ["query"],
@@ -1040,38 +1079,63 @@ async def memory_search_tool(
     _context: dict | None = None,
     **kwargs,
 ) -> str:
-    err = _check_admin_only(_context)
+    chat_type, err = _check_scope(_context)
     if err:
         return err
     if not query:
         return "[错误] 请提供搜索内容"
 
+    # 群聊：仅搜本群记忆（data/groups/<群号>/）+ 本群会话历史
+    group_id = ""
+    if chat_type == "group":
+        group_id = str((_context or {}).get("_target_id", ""))
+        if not group_id or not group_id.isdigit():
+            return "[错误] 无效的群号，无法搜索记忆"
+
+    group_memory_dir = GROUP_MEMORY_ROOT / group_id if group_id else None
+
     results_parts: list[str] = []
 
-    # 1. 结构化记忆搜索
+    # 1. 结构化记忆搜索（私聊搜 admin，群聊搜本群）
     try:
         from ..memory.structured import search_memories
-        structured = search_memories(
-            Path("data/admin/memories.jsonl"),
-            type_filter=type_filter,
-            keyword=query,
-            limit=max_results,
+        structured_path = (
+            Path(f"data/groups/{group_id}/memories.jsonl")
+            if group_id else Path("data/admin/memories.jsonl")
         )
-        if structured:
-            lines: list[str] = []
-            for e in structured:
-                lines.append(
-                    f"[{e.get('type', '?')}/{e.get('subject', '?')}] "
-                    f"{e.get('value', '')} (更新: {e.get('updated', '?')})"
-                )
-            results_parts.append("── 结构化记忆 ──\n" + "\n".join(lines))
+        if structured_path.exists():
+            structured = search_memories(
+                structured_path,
+                type_filter=type_filter if not group_id else "",
+                keyword=query,
+                limit=max_results,
+            )
+            if structured:
+                lines: list[str] = []
+                for e in structured:
+                    lines.append(
+                        f"[{e.get('type', '?')}/{e.get('subject', '?')}] "
+                        f"{e.get('value', '')} (更新: {e.get('updated', '?')})"
+                    )
+                results_parts.append("── 结构化记忆 ──\n" + "\n".join(lines))
     except Exception:
         pass
 
-    # 2. 向量语义搜索（MEMORY.md + history.jsonl）
+    # 2. 向量语义搜索（来源按场景切换）
     try:
         from ..memory.indexer import search
-        vector_results = await search(query, max_results=max_results)
+        if group_id:
+            # 本群记忆目录 + 本群会话历史（排除全量聊天记录 _chatlog）
+            sources = [group_memory_dir / "MEMORY.md"]
+            session_dir = Path(f"data/sessions/groups/{group_id}")
+            if session_dir.exists():
+                sources.extend(
+                    p for p in sorted(session_dir.glob("*.jsonl"))
+                    if p.name != "_chatlog.jsonl"
+                )
+        else:
+            sources = None  # 默认 Admin 记忆源（MEMORY.md + history.jsonl）
+        vector_results = await search(query, max_results=max_results, sources=sources)
         if vector_results:
             lines = []
             for r in vector_results:

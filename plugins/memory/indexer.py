@@ -536,9 +536,11 @@ def mmr_rerank(
 
 # ──────────────────── 混合搜索 ────────────────────
 
-async def search(query: str, max_results: int = 5) -> list[dict]:
+async def search(query: str, max_results: int = 5, sources: list[Path] | None = None) -> list[dict]:
     """
-    混合搜索 MEMORY.md + history.jsonl。
+    混合搜索记忆 + 历史对话。
+
+    sources: 自定义索引来源（不传用默认的 Admin 记忆源，群聊可传本群记忆/会话文件）。
 
     流程：
     1. 向量搜索：query embedding × chunk embedding → 余弦相似度
@@ -549,10 +551,22 @@ async def search(query: str, max_results: int = 5) -> list[dict]:
 
     返回 [{source, text, start_line, end_line, score}, ...]
     """
-    index = await ensure_index()
+    index = await ensure_index(sources)
     chunks = index.get("chunks", [])
     if not chunks:
         return []
+
+    # 共享索引里可能混有其他来源（群聊/私聊）的 chunk，按本次 sources 过滤。
+    # 保留语义：私聊/群聊各自只看到自己范围的记忆，但同一来源内已删除的文件
+    # chunk 仍然保留（可被搜索到），与默认 Admin 搜索行为一致。
+    if sources is not None:
+        allowed = {str(s.resolve()) for s in sources}
+        chunks = [
+            c for c in chunks
+            if str(Path(c.get("source", "")).resolve()) in allowed
+        ]
+        if not chunks:
+            return []
 
     # 1. 向量搜索
     try:

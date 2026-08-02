@@ -263,6 +263,7 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
         from .persona.manager import (
             get_active_persona, load_history, append_message,
             load_persona_prompt, get_group_config, get_group_proactive,
+            load_group_memory,
         )
         from .group.utils import trim_history as group_trim
 
@@ -273,6 +274,11 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
         if persona_prompt is None:
             logger.warning(f"群 {target_id} 心跳: 人格 {persona} 的 prompt 不存在，跳过")
             return
+
+        # 注入本群长期记忆（与群聊对话一致）
+        group_memory = load_group_memory(target_id)
+        if group_memory:
+            persona_prompt += "\n\n" + group_memory
 
         history = load_history(target_id, persona)
         if history and history[-1].get("role") != "assistant":

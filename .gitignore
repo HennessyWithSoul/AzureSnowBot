@@ -5,6 +5,7 @@ vendor/
 reference/
 good_persona/
 data/sessions
+data/groups
 data/admin/config.json
 data/admin/history.jsonl
 data/admin/SOUL.md

@@ -2,7 +2,9 @@
 tests/test_file_tools.py
 ─────────────────────────
 测试文件系统工具（read_file, write_file, list_files）:
-  - 安全校验：admin_only + 路径白名单
+  - 安全校验：场景校验（私聊/群聊）+ 路径白名单
+  - 私聊：data/admin/、data/skills/、data/personas/
+  - 群聊：仅 data/groups/<群号>/（本群记忆）
   - 正常读写功能
   - 路径遍历防护
   - 边界情况
@@ -27,61 +29,112 @@ from plugins.local_tools.tools import (
     read_file_tool,
     write_file_tool,
     list_files_tool,
-    _check_admin_only,
+    memory_search_tool,
+    _check_scope,
     _resolve_safe_path,
 )
 
 
-# ──────────────────── _check_admin_only ────────────────────
+PRIVATE_CTX = {"_chat_type": "private", "_target_id": "373900859"}
+GROUP_CTX = {"_chat_type": "group", "_target_id": "123456"}
+GROUP_ID = "123456"
 
-class TestCheckAdminOnly:
+
+# ──────────────────── _check_scope ────────────────────
+
+class TestCheckScope:
 
     def test_no_context(self):
-        assert _check_admin_only(None) is not None
-        assert "Admin" in _check_admin_only(None) or "仅限" in _check_admin_only(None)
-
-    def test_group_rejected(self):
-        err = _check_admin_only({"_chat_type": "group"})
+        _, err = _check_scope(None)
         assert err is not None
         assert "仅限" in err
 
+    def test_unknown_chat_type(self):
+        _, err = _check_scope({"_chat_type": "other"})
+        assert err is not None
+
     def test_private_allowed(self):
-        err = _check_admin_only({"_chat_type": "private"})
+        chat_type, err = _check_scope({"_chat_type": "private"})
         assert err is None
+        assert chat_type == "private"
+
+    def test_group_allowed(self):
+        """群聊现在也可以使用文件工具（范围限定本群目录）"""
+        chat_type, err = _check_scope(GROUP_CTX)
+        assert err is None
+        assert chat_type == "group"
 
 
 # ──────────────────── _resolve_safe_path ────────────────────
 
-class TestResolveSafePath:
+class TestResolveSafePathPrivate:
 
     def test_valid_admin_path(self):
-        _, err = _resolve_safe_path("data/admin/MEMORY.md")
+        _, err = _resolve_safe_path("data/admin/MEMORY.md", PRIVATE_CTX)
         assert err is None
 
     def test_valid_personas_path(self):
-        _, err = _resolve_safe_path("data/personas/default.txt")
+        _, err = _resolve_safe_path("data/personas/default.txt", PRIVATE_CTX)
         assert err is None
 
     def test_valid_skills_path(self):
-        _, err = _resolve_safe_path("data/skills/web-search")
+        _, err = _resolve_safe_path("data/skills/web-search", PRIVATE_CTX)
         assert err is None
 
     def test_blocked_outside_whitelist(self):
-        _, err = _resolve_safe_path("plugins/llm.py")
+        _, err = _resolve_safe_path("plugins/llm.py", PRIVATE_CTX)
         assert err is not None
         assert "不在允许范围" in err
 
     def test_blocked_root_path(self):
-        _, err = _resolve_safe_path("pyproject.toml")
+        _, err = _resolve_safe_path("pyproject.toml", PRIVATE_CTX)
         assert err is not None
 
     def test_path_traversal_blocked(self):
         """尝试 .. 遍历逃出白名单"""
-        _, err = _resolve_safe_path("data/admin/../../pyproject.toml")
+        _, err = _resolve_safe_path("data/admin/../../pyproject.toml", PRIVATE_CTX)
         assert err is not None
 
     def test_absolute_path_outside(self):
-        _, err = _resolve_safe_path("C:/Windows/System32/cmd.exe")
+        _, err = _resolve_safe_path("C:/Windows/System32/cmd.exe", PRIVATE_CTX)
+        assert err is not None
+
+
+class TestResolveSafePathGroup:
+
+    def test_valid_group_memory_path(self):
+        target, err = _resolve_safe_path(f"data/groups/{GROUP_ID}/MEMORY.md", GROUP_CTX)
+        assert err is None
+        assert str(target).replace("\\", "/").endswith(f"data/groups/{GROUP_ID}/MEMORY.md")
+
+    def test_group_cannot_access_admin(self):
+        """群聊不能读 Admin 记忆"""
+        _, err = _resolve_safe_path("data/admin/MEMORY.md", GROUP_CTX)
+        assert err is not None
+        assert "不在允许范围" in err
+
+    def test_group_cannot_access_other_group(self):
+        """群聊不能访问其他群的记忆目录"""
+        _, err = _resolve_safe_path(f"data/groups/{GROUP_ID}2/MEMORY.md", GROUP_CTX)
+        assert err is not None
+
+    def test_group_path_traversal_blocked(self):
+        _, err = _resolve_safe_path(f"data/groups/{GROUP_ID}/../../admin/MEMORY.md", GROUP_CTX)
+        assert err is not None
+
+    def test_group_invalid_group_id(self):
+        """非纯数字群号拒绝（防止路径注入）"""
+        ctx = {"_chat_type": "group", "_target_id": "abc/../admin"}
+        _, err = _resolve_safe_path("data/groups/abc/MEMORY.md", ctx)
+        assert err is not None
+
+    def test_group_missing_target_id(self):
+        ctx = {"_chat_type": "group"}
+        _, err = _resolve_safe_path("data/groups/1/MEMORY.md", ctx)
+        assert err is not None
+
+    def test_no_context_rejected(self):
+        _, err = _resolve_safe_path("data/admin/MEMORY.md")
         assert err is not None
 
 
@@ -95,19 +148,16 @@ class TestReadFileTool:
         assert "仅限" in result
 
     @pytest.mark.asyncio
-    async def test_rejected_in_group(self):
+    async def test_group_cannot_read_admin(self):
         result = await read_file_tool(
             path="data/admin/MEMORY.md",
-            _context={"_chat_type": "group"},
+            _context=GROUP_CTX,
         )
-        assert "仅限" in result
+        assert "不在允许范围" in result
 
     @pytest.mark.asyncio
     async def test_empty_path(self):
-        result = await read_file_tool(
-            path="",
-            _context={"_chat_type": "private"},
-        )
+        result = await read_file_tool(path="", _context=PRIVATE_CTX)
         assert "错误" in result
 
     @pytest.mark.asyncio
@@ -122,7 +172,7 @@ class TestReadFileTool:
         try:
             result = await read_file_tool(
                 path=str(test_file),
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "hello world" in result
         finally:
@@ -132,7 +182,7 @@ class TestReadFileTool:
     async def test_read_nonexistent_file(self):
         result = await read_file_tool(
             path="data/admin/nonexistent_file_xyz.md",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不存在" in result
 
@@ -140,7 +190,7 @@ class TestReadFileTool:
     async def test_read_outside_whitelist(self):
         result = await read_file_tool(
             path="plugins/llm.py",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不在允许范围" in result
 
@@ -148,7 +198,7 @@ class TestReadFileTool:
     async def test_path_traversal(self):
         result = await read_file_tool(
             path="data/admin/../../.env",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不在允许范围" in result
 
@@ -163,11 +213,45 @@ class TestReadFileTool:
         try:
             result = await read_file_tool(
                 path=str(test_file),
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "为空" in result
         finally:
             tools._ALLOWED_ROOTS = original
+
+
+# ──────────────────── read_file_tool（群聊） ────────────────────
+
+class TestReadFileToolGroup:
+
+    @pytest.mark.asyncio
+    async def test_read_group_memory(self, tmp_path):
+        """群聊读取本群 MEMORY.md"""
+        from plugins.local_tools import tools
+        original_root = tools.GROUP_MEMORY_ROOT
+        original_roots = tools._ALLOWED_ROOTS
+        tools.GROUP_MEMORY_ROOT = tmp_path
+        tools._ALLOWED_ROOTS = []
+        try:
+            mem = tmp_path / GROUP_ID / "MEMORY.md"
+            mem.parent.mkdir(parents=True)
+            mem.write_text("群记忆内容", encoding="utf-8")
+            result = await read_file_tool(
+                path=str(mem),
+                _context=GROUP_CTX,
+            )
+            assert "群记忆内容" in result
+        finally:
+            tools.GROUP_MEMORY_ROOT = original_root
+            tools._ALLOWED_ROOTS = original_roots
+
+    @pytest.mark.asyncio
+    async def test_read_group_memory_nonexistent(self):
+        result = await read_file_tool(
+            path=f"data/groups/{GROUP_ID}/MEMORY.md",
+            _context=GROUP_CTX,
+        )
+        assert "不存在" in result
 
 
 # ──────────────────── write_file_tool ────────────────────
@@ -175,20 +259,20 @@ class TestReadFileTool:
 class TestWriteFileTool:
 
     @pytest.mark.asyncio
-    async def test_rejected_in_group(self):
+    async def test_group_cannot_write_admin(self):
         result = await write_file_tool(
             path="data/admin/MEMORY.md",
             content="test",
-            _context={"_chat_type": "group"},
+            _context=GROUP_CTX,
         )
-        assert "仅限" in result
+        assert "不在允许范围" in result
 
     @pytest.mark.asyncio
     async def test_empty_path(self):
         result = await write_file_tool(
             path="",
             content="test",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "错误" in result
 
@@ -197,7 +281,7 @@ class TestWriteFileTool:
         result = await write_file_tool(
             path="plugins/llm.py",
             content="hacked",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不在允许范围" in result
 
@@ -212,7 +296,7 @@ class TestWriteFileTool:
             result = await write_file_tool(
                 path=str(test_file),
                 content="写入测试内容",
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "已写入" in result
             assert test_file.read_text(encoding="utf-8") == "写入测试内容"
@@ -230,7 +314,7 @@ class TestWriteFileTool:
             result = await write_file_tool(
                 path=str(test_file),
                 content="nested content",
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "已写入" in result
             assert test_file.exists()
@@ -249,11 +333,66 @@ class TestWriteFileTool:
             result = await write_file_tool(
                 path=str(test_file),
                 content=content,
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "5" in result
         finally:
             tools._ALLOWED_ROOTS = original
+
+
+# ──────────────────── write_file_tool（群聊） ────────────────────
+
+class TestWriteFileToolGroup:
+
+    @pytest.mark.asyncio
+    async def test_write_group_memory(self, tmp_path):
+        """群聊写入本群 MEMORY.md"""
+        from plugins.local_tools import tools
+        original_root = tools.GROUP_MEMORY_ROOT
+        original_roots = tools._ALLOWED_ROOTS
+        tools.GROUP_MEMORY_ROOT = tmp_path
+        tools._ALLOWED_ROOTS = []
+        try:
+            mem = tmp_path / GROUP_ID / "MEMORY.md"
+            result = await write_file_tool(
+                path=str(mem),
+                content="群聊记忆测试",
+                _context=GROUP_CTX,
+            )
+            assert "已写入" in result
+            assert mem.read_text(encoding="utf-8") == "群聊记忆测试"
+        finally:
+            tools.GROUP_MEMORY_ROOT = original_root
+            tools._ALLOWED_ROOTS = original_roots
+
+    @pytest.mark.asyncio
+    async def test_write_group_cannot_write_other_group(self, tmp_path):
+        from plugins.local_tools import tools
+        original_root = tools.GROUP_MEMORY_ROOT
+        original_roots = tools._ALLOWED_ROOTS
+        tools.GROUP_MEMORY_ROOT = tmp_path
+        tools._ALLOWED_ROOTS = []
+        try:
+            result = await write_file_tool(
+                path=str(tmp_path / f"{GROUP_ID}9" / "MEMORY.md"),
+                content="越权写入",
+                _context=GROUP_CTX,
+            )
+            assert "不在允许范围" in result
+            assert not (tmp_path / f"{GROUP_ID}9" / "MEMORY.md").exists()
+        finally:
+            tools.GROUP_MEMORY_ROOT = original_root
+            tools._ALLOWED_ROOTS = original_roots
+
+    @pytest.mark.asyncio
+    async def test_write_group_invalid_group_id(self):
+        ctx = {"_chat_type": "group", "_target_id": "../admin"}
+        result = await write_file_tool(
+            path="data/groups/../admin/evil.md",
+            content="x",
+            _context=ctx,
+        )
+        assert "错误" in result
 
 
 # ──────────────────── list_files_tool ────────────────────
@@ -261,18 +400,18 @@ class TestWriteFileTool:
 class TestListFilesTool:
 
     @pytest.mark.asyncio
-    async def test_rejected_in_group(self):
+    async def test_group_cannot_list_admin(self):
         result = await list_files_tool(
             path="data/admin",
-            _context={"_chat_type": "group"},
+            _context=GROUP_CTX,
         )
-        assert "仅限" in result
+        assert "不在允许范围" in result
 
     @pytest.mark.asyncio
     async def test_empty_path(self):
         result = await list_files_tool(
             path="",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "错误" in result
 
@@ -280,7 +419,7 @@ class TestListFilesTool:
     async def test_outside_whitelist(self):
         result = await list_files_tool(
             path="plugins",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不在允许范围" in result
 
@@ -288,7 +427,7 @@ class TestListFilesTool:
     async def test_nonexistent_dir(self):
         result = await list_files_tool(
             path="data/admin/no_such_dir_xyz",
-            _context={"_chat_type": "private"},
+            _context=PRIVATE_CTX,
         )
         assert "不存在" in result
 
@@ -304,7 +443,7 @@ class TestListFilesTool:
         try:
             result = await list_files_tool(
                 path=str(tmp_path),
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "file1.txt" in result
             assert "file2.md" in result
@@ -324,8 +463,58 @@ class TestListFilesTool:
         try:
             result = await list_files_tool(
                 path=str(empty_dir),
-                _context={"_chat_type": "private"},
+                _context=PRIVATE_CTX,
             )
             assert "为空" in result
         finally:
             tools._ALLOWED_ROOTS = original
+
+
+# ──────────────────── list_files_tool（群聊） ────────────────────
+
+class TestListFilesToolGroup:
+
+    @pytest.mark.asyncio
+    async def test_list_group_memory_dir(self, tmp_path):
+        from plugins.local_tools import tools
+        original_root = tools.GROUP_MEMORY_ROOT
+        original_roots = tools._ALLOWED_ROOTS
+        tools.GROUP_MEMORY_ROOT = tmp_path
+        tools._ALLOWED_ROOTS = []
+        try:
+            gdir = tmp_path / GROUP_ID
+            gdir.mkdir(parents=True)
+            (gdir / "MEMORY.md").write_text("x", encoding="utf-8")
+            result = await list_files_tool(
+                path=str(gdir),
+                _context=GROUP_CTX,
+            )
+            assert "MEMORY.md" in result
+        finally:
+            tools.GROUP_MEMORY_ROOT = original_root
+            tools._ALLOWED_ROOTS = original_roots
+
+
+# ──────────────────── memory_search_tool（群聊场景） ────────────────────
+
+class TestMemorySearchGroup:
+
+    @pytest.mark.asyncio
+    async def test_group_search_no_memory(self):
+        """群聊搜索无记忆时返回未找到（不崩溃）"""
+        result = await memory_search_tool(
+            query="测试",
+            _context=GROUP_CTX,
+        )
+        assert "未找到" in result
+
+    @pytest.mark.asyncio
+    async def test_group_invalid_group_id(self):
+        ctx = {"_chat_type": "group", "_target_id": "abc"}
+        result = await memory_search_tool(query="测试", _context=ctx)
+        assert "错误" in result
+
+    @pytest.mark.asyncio
+    async def test_private_no_context_rejected(self):
+        result = await memory_search_tool(query="测试")
+        assert "仅限" in result

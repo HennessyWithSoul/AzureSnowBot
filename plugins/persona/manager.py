@@ -23,11 +23,37 @@ from nonebot.log import logger
 # ──────────────────── 路径常量 ────────────────────
 GLOBAL_PERSONA_DIR = Path("data/personas")
 GROUP_SESSION_DIR = Path("data/sessions/groups")
+GROUP_MEMORY_DIR = Path("data/groups")  # 群长期记忆根目录: data/groups/<群号>/
 
 GLOBAL_PERSONA_DIR.mkdir(parents=True, exist_ok=True)
 GROUP_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+GROUP_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_PERSONA = "default"
+
+
+# ──────────────────── 群长期记忆 ────────────────────
+
+def group_memory_path(group_id: str) -> Path:
+    """群长期记忆 MEMORY.md 路径（data/groups/<群号>/MEMORY.md）"""
+    return GROUP_MEMORY_DIR / str(group_id) / "MEMORY.md"
+
+
+def load_group_memory(group_id: str, max_chars: int = 3000) -> str:
+    """加载群长期记忆，格式化为可注入 system prompt 的文本。
+
+    超过 max_chars 截断（完整内容可用 read_file/memory_search 获取）。
+    文件不存在或为空返回 ""。
+    """
+    path = group_memory_path(group_id)
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return ""
+    if len(content) > max_chars:
+        content = content[:max_chars] + "\n...（记忆过长已截断，可用 read_file 查看完整内容）"
+    return f"# 本群长期记忆 MEMORY.md\n{content}"
 
 
 # ──────────────────── 路径工具 ────────────────────

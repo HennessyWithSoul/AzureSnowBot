@@ -173,18 +173,22 @@ class TestToolsSummaryIntegration:
     """确保 build_runtime_context 将 chat_type 传递给工具摘要"""
 
     def test_private_tools_summary_includes_admin_tools(self):
-        """私聊应能看到 admin_only 工具（如 read_file）"""
+        """私聊应能看到文件/记忆工具（如 read_file）"""
         result = build_runtime_context(chat_type="private")
-        # read_file 是 admin_only 工具，私聊应可见
         assert "read_file" in result
 
-    def test_group_tools_summary_excludes_admin_tools(self):
-        """群聊不应看到 admin_only 工具"""
+    def test_group_tools_summary_includes_memory_tools(self):
+        """群聊应能看到记忆工具（read_file/write_file/list_files/memory_search）"""
         result = build_runtime_context(chat_type="group")
-        # admin_only 工具不应出现在群聊工具摘要中
-        assert "read_file" not in result
-        assert "write_file" not in result
-        assert "list_files" not in result
+        assert "read_file" in result
+        assert "write_file" in result
+        assert "list_files" in result
+        assert "memory_search" in result
+
+    def test_group_tools_summary_excludes_admin_only_tools(self):
+        """群聊不应看到 admin_only 工具（如 run_command）"""
+        result = build_runtime_context(chat_type="group")
+        assert "run_command" not in result
 
     def test_group_tools_summary_includes_public_tools(self):
         """群聊仍应看到公共工具"""
@@ -202,11 +206,17 @@ class TestBuildToolsSummary:
         assert "write_file" in summary
         assert "list_files" in summary
 
-    def test_group_excludes_admin_tools(self):
+    def test_group_includes_memory_tools(self):
         summary = _build_tools_summary(chat_type="group")
-        assert "read_file" not in summary
-        assert "write_file" not in summary
-        assert "list_files" not in summary
+        assert "read_file" in summary
+        assert "write_file" in summary
+        assert "list_files" in summary
+        assert "memory_search" in summary
+
+    def test_group_excludes_admin_only_tools(self):
+        summary = _build_tools_summary(chat_type="group")
+        assert "run_command" not in summary
+        assert "get_token_stats" not in summary
 
     def test_default_is_private(self):
         summary_default = _build_tools_summary()
