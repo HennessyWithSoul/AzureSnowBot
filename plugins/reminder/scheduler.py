@@ -202,14 +202,22 @@ def _append_to_history(job: ReminderJob, text: str) -> None:
 
 
 def _reset_proactive_if_admin(job: ReminderJob) -> None:
-    """如果提醒是发给 admin 私聊的，重置主动发言计时器防止时间重叠。"""
-    global _admin_number
-    if not _admin_number:
-        from nonebot import get_driver
-        _admin_number = str(getattr(get_driver().config, "admin_number", ""))
-    if job.chat_type == "private" and _admin_number and job.target_id == _admin_number:
-        from ..chat.proactive import reset_idle_timer
-        reset_idle_timer()
+    """提醒触发后，重置对应会话的主动对话计时器防止时间重叠（仅该会话开关开启时）。"""
+    from ..proactive import reset_idle_timer
+
+    if job.chat_type == "private":
+        global _admin_number
+        if not _admin_number:
+            from nonebot import get_driver
+            _admin_number = str(getattr(get_driver().config, "admin_number", ""))
+        if _admin_number and job.target_id == _admin_number:
+            from ..chat.handler import get_proactive_enabled
+            if get_proactive_enabled():
+                reset_idle_timer("private")
+    elif job.chat_type == "group":
+        from ..persona.manager import get_group_proactive
+        if get_group_proactive(job.target_id):
+            reset_idle_timer(f"group:{job.target_id}")
 
 
 # ──────────────────── 触发逻辑 ────────────────────

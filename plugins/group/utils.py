@@ -4,7 +4,9 @@
 白名单、@检测、文本提取等公共函数，供 group 包内各模块及其他包使用。
 """
 
+import asyncio
 import json
+from pathlib import Path
 
 from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Bot
@@ -128,4 +130,107 @@ def in_whitelist(group_id: int) -> bool:
     if not GROUP_WHITELIST:
         return False
     return str(group_id) in GROUP_WHITELIST
+
+
+# ──────────────────── 白名单管理（运行时 + .env 持久化） ────────────────────
+
+ENV_PATH = Path(".env")
+
+
+def list_whitelist() -> list[str]:
+    """返回当前白名单群号列表"""
+    return list(GROUP_WHITELIST)
+
+
+def add_to_whitelist(group_id: str) -> bool:
+    """添加群到白名单（立即生效 + 持久化到 .env），返回是否新增"""
+    if group_id in GROUP_WHITELIST:
+        return False
+    GROUP_WHITELIST.append(group_id)
+    _persist_whitelist()
+    logger.info(f"白名单已添加群: {group_id}")
+    return True
+
+
+def remove_from_whitelist(group_id: str) -> bool:
+    """从白名单删除群（立即生效 + 持久化到 .env），返回是否删除"""
+    if group_id not in GROUP_WHITELIST:
+        return False
+    GROUP_WHITELIST.remove(group_id)
+    _persist_whitelist()
+    logger.info(f"白名单已删除群: {group_id}")
+    return True
+
+
+def _persist_whitelist() -> None:
+    """把当前白名单写回 .env 的 GROUP_WHITELIST 行（重启后仍生效）"""
+    line = f"GROUP_WHITELIST={json.dumps(GROUP_WHITELIST, ensure_ascii=False)}"
+    if ENV_PATH.exists():
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+        for i, l in enumerate(lines):
+            if l.strip().startswith("GROUP_WHITELIST="):
+                lines[i] = line
+                break
+        else:
+            lines.append(line)
+        ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        ENV_PATH.write_text(line + "\n", encoding="utf-8")
+
+
+def handle_whitelist_command(text: str) -> str:
+    """解析 /白名单 指令文本（list | add <群号> | delete <群号>），返回回复内容。
+
+    供群聊和私聊两个 matcher 共用。
+    """
+    args = text[len("/白名单"):].strip().split()
+    if not args:
+        return "用法: /白名单 list | add <群号> | delete <群号>"
+
+    cmd, *rest = args
+
+    if cmd == "list":
+        groups = list_whitelist()
+        if not groups:
+            return "白名单为空。"
+        return f"白名单中的群（{len(groups)} 个）:\n" + "\n".join(f"- {g}" for g in groups)
+
+    if cmd == "add":
+        if not rest:
+            return "用法: /白名单 add <群号>"
+        gid = rest[0]
+        if not gid.isdigit():
+            return f"无效的群号: {gid}"
+        if add_to_whitelist(gid):
+            return f"已将群 {gid} 加入白名单。"
+        return f"群 {gid} 已在白名单中。"
+
+    if cmd == "delete":
+        if not rest:
+            return "用法: /白名单 delete <群号>"
+        gid = rest[0]
+        if not gid.isdigit():
+            return f"无效的群号: {gid}"
+        if remove_from_whitelist(gid):
+            return f"已将群 {gid} 移出白名单。"
+        return f"群 {gid} 不在白名单中。"
+
+    return f"未知指令: {cmd}（可用: list | add <群号> | delete <群号>）"
+
+
+# ──────────────────── 会话级锁 ────────────────────
+# 同一 (群, 人格) 的对话请求串行处理：
+# 多人同时 @Bot 时，若并发跑 Agentic Loop，会互相读到对方的消息历史、
+# 混淆工具调用结果、交错写入 history.jsonl。锁保证每个问题拿到完整的一轮。
+_session_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def get_session_lock(group_id: str, persona: str) -> asyncio.Lock:
+    """获取 (群, 人格) 维度的会话锁，同一会话的请求串行执行。"""
+    key = (group_id, persona)
+    lock = _session_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[key] = lock
+    return lock
 

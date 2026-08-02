@@ -9,8 +9,8 @@ from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter
 load_dotenv()
 
 # ── Provider 选择（命令行参数）──
-# 用法: python main.py glm
-_provider = sys.argv[1].lower() if len(sys.argv) > 1 else "openai"
+# 默认 deepseek；也可: python main.py qwen（需在 .env 配置对应 key）
+_provider = sys.argv[1].lower() if len(sys.argv) > 1 else "deepseek"
 if _provider == "qwen":
     os.environ["LLM_PROVIDER"] = "qwen"
     # glm 模式实际走 DashScope 的 qwen-plus 兼容接口

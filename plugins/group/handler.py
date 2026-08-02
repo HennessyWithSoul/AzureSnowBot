@@ -2,6 +2,9 @@
 群聊对话处理
 ──────────
 @Bot 触发的群聊消息处理，包含 agentic loop（支持 MCP 工具调用）。
+
+并发安全：同一 (群, 人格) 的请求通过 get_session_lock 串行执行，
+防止多人同时 @Bot 时互相读到对方的历史/工具结果。
 """
 
 import json
@@ -13,10 +16,12 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.exception import FinishedException
 from nonebot.log import logger
 
+from ..chunker import chunk_text, send_chunked
 from ..runtime_context import build_runtime_context
 from ..persona.manager import (
     get_active_persona, load_persona_prompt,
     load_history, append_message, get_group_config,
+    get_listen_all, get_group_proactive,
     _session_path as persona_session_path,
 )
 from ..mcp.manager import get_openai_tools, call_tool, MAX_TOOL_ROUNDS
@@ -29,12 +34,16 @@ from ..local_tools.manager import (
     get_openai_tools as local_openai_tools,
     handle_tool_call as local_handle_tool_call,
 )
-from ..llm import API_KEY as OPENAI_API_KEY, BASE_URL as OPENAI_BASE_URL, MODEL as OPENAI_MODEL
+from ..llm import (
+    API_KEY as OPENAI_API_KEY, BASE_URL as OPENAI_BASE_URL, MODEL as OPENAI_MODEL,
+    SUPPORTS_VISION,
+)
+from ..proactive import reset_idle_timer as reset_group_proactive_timer
 from .utils import (
     in_whitelist, is_at_bot, extract_text,
     get_reply_id, fetch_quoted_text, fetch_quoted_image_urls, trim_history,
+    get_session_lock,
 )
-from ..chunker import chunk_text, send_chunked
 
 # ──────────────────── 群聊对话处理 ────────────────────
 group_chat = on_message(priority=98, block=False)
@@ -44,7 +53,15 @@ group_chat = on_message(priority=98, block=False)
 async def handle_group_chat(event: GroupMessageEvent):
     if not in_whitelist(event.group_id):
         return
-    if not is_at_bot(event):
+
+    group_id = str(event.group_id)
+
+    # 全量监听模式：读取并回应群里所有消息；否则仅响应 @Bot
+    if not is_at_bot(event) and not get_listen_all(group_id):
+        return
+
+    # 忽略 Bot 自己发出的消息（全量模式下避免自我触发循环）
+    if event.user_id == event.self_id:
         return
 
     user_input = extract_text(event)
@@ -54,6 +71,20 @@ async def handle_group_chat(event: GroupMessageEvent):
     if not OPENAI_API_KEY:
         await group_chat.finish("未配置 OpenAI API Key，请联系管理员。")
 
+    active_persona = get_active_persona(group_id)
+
+    # 会话级锁：同一 (群, 人格) 的请求串行处理。
+    # 不加锁时两人同时 @Bot 会并发读写同一份历史并各自跑 Agentic Loop，
+    # 导致问题得不到回答、工具调用结果互相混淆。
+    async with get_session_lock(group_id, active_persona):
+        await _handle_group_chat(event, group_id, active_persona, user_input)
+
+
+async def _handle_group_chat(
+    event: GroupMessageEvent, group_id: str, active_persona: str, user_input: str,
+):
+    """群聊对话处理主体（持有会话锁执行）"""
+
     # 检查是否引用了消息
     quoted_text = ""
     quoted_image_urls: list[str] = []
@@ -61,13 +92,13 @@ async def handle_group_chat(event: GroupMessageEvent):
     if reply_id:
         bot = get_bot()
         quoted_text = await fetch_quoted_text(bot, reply_id)
-        quoted_image_urls = await fetch_quoted_image_urls(bot, reply_id)
+        # 仅当模型支持多模态时才抓取引用图片（deepseek 等不支持，省一次 API 调用）
+        if SUPPORTS_VISION:
+            quoted_image_urls = await fetch_quoted_image_urls(bot, reply_id)
 
-    group_id = str(event.group_id)
     sender = event.sender.nickname or str(event.user_id)
 
     # 获取当前人格与 prompt
-    active_persona = get_active_persona(group_id)
     system_prompt = load_persona_prompt(active_persona, group_id)
     if system_prompt is None:
         logger.warning(f"群 {group_id} 人格 {active_persona} 的 prompt 文件不存在，跳过响应")
@@ -167,6 +198,9 @@ async def handle_group_chat(event: GroupMessageEvent):
                     bot = get_bot()
                     chunks = chunk_text(reply)
                     await send_chunked(bot, event, chunks)
+                    # Bot 刚在群里发言，延后该群的主动对话心跳（仅开启时）
+                    if get_group_proactive(group_id):
+                        reset_group_proactive_timer(f"group:{group_id}")
                 return
 
             messages.append(assistant_msg)
@@ -213,6 +247,9 @@ async def handle_group_chat(event: GroupMessageEvent):
             bot = get_bot()
             chunks = chunk_text(reply)
             await send_chunked(bot, event, chunks)
+            # Bot 刚在群里发言，延后该群的主动对话心跳（仅开启时）
+            if get_group_proactive(group_id):
+                reset_group_proactive_timer(f"group:{group_id}")
     except httpx.HTTPStatusError as e:
         logger.error(f"OpenAI API 错误: {e.response.status_code} {e.response.text}")
         await group_chat.finish(f"API 请求失败 ({e.response.status_code})")

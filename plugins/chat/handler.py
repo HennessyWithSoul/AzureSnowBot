@@ -30,13 +30,16 @@ from ..skill.manager import (
     get_openai_tools as skill_openai_tools,
     handle_tool_call as skill_handle_tool_call,
 )
-from .proactive import reset_idle_timer, cancel_idle_timer
+from ..proactive import reset_idle_timer, cancel_idle_timer
 from .compaction import compact_history, should_compact
 from ..group.utils import fetch_quoted_image_urls
 
 # ──────────────────── 配置 ────────────────────
 config = get_driver().config
-from ..llm import API_KEY as OPENAI_API_KEY, BASE_URL as OPENAI_BASE_URL, MODEL as OPENAI_MODEL
+from ..llm import (
+    API_KEY as OPENAI_API_KEY, BASE_URL as OPENAI_BASE_URL, MODEL as OPENAI_MODEL,
+    SUPPORTS_VISION,
+)
 ADMIN_NUMBER: str = str(getattr(config, "admin_number", ""))
 
 # 会话目录
@@ -132,6 +135,21 @@ def get_config(user_id: str) -> dict:
     return _load_config(user_id)
 
 
+# ──────────────────── 主动对话开关（私聊） ────────────────────
+
+def get_proactive_enabled() -> bool:
+    """Admin 私聊主动对话开关（默认开启）"""
+    cfg = _load_config(str(ADMIN_NUMBER))
+    return bool(cfg.get("proactive_enabled", True))
+
+
+def set_proactive_enabled(enabled: bool) -> None:
+    """设置 Admin 私聊主动对话开关"""
+    cfg = _load_config(str(ADMIN_NUMBER))
+    cfg["proactive_enabled"] = bool(enabled)
+    _save_config(str(ADMIN_NUMBER), cfg)
+
+
 # ──────────────────── JSONL 会话持久化 ────────────────────
 
 def load_history(user_id: str) -> list[dict]:
@@ -211,7 +229,7 @@ async def handle_reset(event: PrivateMessageEvent):
     user_id = str(event.user_id)
     clear_history(user_id)
     if user_id == str(ADMIN_NUMBER):
-        cancel_idle_timer()
+        cancel_idle_timer("private")
         # 清除该用户的所有定时提醒
         from ..reminder.scheduler import clear_reminders
         cleared = clear_reminders("private", user_id)
@@ -233,6 +251,73 @@ async def handle_compact(event: PrivateMessageEvent):
         await compact_cmd.finish("对话历史已压缩。")
     else:
         await compact_cmd.finish("当前历史不需要压缩。")
+
+
+# ──────────────────── 主动对话开关指令 ────────────────────
+proactive_cmd = on_message(priority=10, block=True)
+
+
+@proactive_cmd.handle()
+async def handle_proactive_cmd(event: PrivateMessageEvent):
+    user_id = str(event.user_id)
+    if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
+        return  # 非管理员直接忽略，交给后面的聊天处理器
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/主动对话"):
+        return
+
+    arg = text[len("/主动对话"):].strip().lower()
+    if arg in ("enable", "on", "开"):
+        enable = True
+    elif arg in ("disable", "off", "关"):
+        enable = False
+    elif not arg:
+        enable = not get_proactive_enabled()
+    else:
+        await proactive_cmd.finish("用法: /主动对话 enable|disable")
+
+    set_proactive_enabled(enable)
+    if enable:
+        reset_idle_timer("private")
+    else:
+        cancel_idle_timer("private")
+    await proactive_cmd.finish(f"私聊主动对话已{'开启' if enable else '关闭'}。")
+
+
+# ──────────────────── /help ────────────────────
+PRIVATE_HELP = """/reset — 清除对话历史
+/compact — 压缩对话历史（自动提取记忆）
+/主动对话 enable|disable — 切换主动对话（Bot 空闲时主动发消息）
+/help — 显示本帮助"""
+
+help_cmd = on_fullmatch("/help", priority=10, block=True)
+
+
+@help_cmd.handle()
+async def handle_help(event: PrivateMessageEvent):
+    user_id = str(event.user_id)
+    if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
+        return
+    await help_cmd.finish(PRIVATE_HELP)
+
+
+# ──────────────────── /白名单 群白名单管理（私聊） ────────────────────
+whitelist_cmd = on_message(priority=10, block=True)
+
+
+@whitelist_cmd.handle()
+async def handle_whitelist_private(event: PrivateMessageEvent):
+    user_id = str(event.user_id)
+    if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
+        return  # 私聊本身仅 Admin 可对话，非管理员直接忽略
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/白名单"):
+        return
+
+    from ..group.utils import handle_whitelist_command
+    await whitelist_cmd.finish(handle_whitelist_command(text))
 
 
 # ──────────────────── 主对话处理 ────────────────────
@@ -275,8 +360,9 @@ async def handle_chat(event: PrivateMessageEvent):
             elif isinstance(raw_msg, list):
                 parts = [seg.get("data", {}).get("text", "") for seg in raw_msg if isinstance(seg, dict) and seg.get("type") == "text"]
                 quoted_text = "".join(parts).strip()
-            # 获取引用消息中的图片
-            quoted_image_urls = await fetch_quoted_image_urls(bot, reply_id)
+            # 获取引用消息中的图片（仅当模型支持多模态，deepseek 等不支持）
+            if SUPPORTS_VISION:
+                quoted_image_urls = await fetch_quoted_image_urls(bot, reply_id)
         except Exception as e:
             logger.warning(f"获取引用消息失败: {e}")
 
@@ -374,7 +460,7 @@ async def handle_chat(event: PrivateMessageEvent):
                     bot = get_bot()
                     chunks = chunk_text(reply)
                     await send_chunked(bot, event, chunks, reply_first=False)
-                    reset_idle_timer()
+                    reset_idle_timer("private")
                 return
 
             # 处理工具调用
@@ -421,7 +507,7 @@ async def handle_chat(event: PrivateMessageEvent):
             bot = get_bot()
             chunks = chunk_text(reply)
             await send_chunked(bot, event, chunks, reply_first=False)
-        reset_idle_timer()
+        reset_idle_timer("private")
     except httpx.HTTPStatusError as e:
         logger.error(f"OpenAI API 错误: {e.response.status_code} {e.response.text}")
         await chat.finish(f"API 请求失败 ({e.response.status_code})")

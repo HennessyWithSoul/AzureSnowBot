@@ -139,8 +139,8 @@ plugins/
 ├── __init__.py          # 空文件
 ├── chat/               # 私聊（仅 Admin）
 │   ├── handler.py      #   对话处理 + Agentic Loop
-│   ├── compaction.py   #   对话压缩 + 记忆提取
-│   └── proactive.py    #   心跳 + 主动发言
+│   └── compaction.py   #   对话压缩 + 记忆提取
+├── proactive.py        # 心跳 + 主动发言引擎（私聊 & 群聊，keyed 计时器）
 ├── group/              # 群聊
 │   ├── handler.py      #   对话处理 + Agentic Loop
 │   ├── chatlog.py      #   全量消息记录
@@ -336,33 +336,20 @@ System prompt 常驻注入：
 
 **适用**: 私聊 + 群聊共享。
 
-### 6. 主动发言扩展到群聊（优先级：低）
+### 6. 主动发言扩展到群聊（已完成）
 
-**状态**: Admin 私聊版已完成，合并为心跳机制 (`plugins/chat/proactive.py`)。
-启动时自动开启心跳计时器，HEARTBEAT.md 文件驱动，带完整工具链。
+**状态**: 已实现。统一引擎 `plugins/proactive.py`（根级模块，keyed 计时器 + 私聊/群聊心跳）：
 
-**推荐重构**: 提升为 `plugins/proactive.py`（根级模块），抽象为引擎 + 回调模式：
+- key 格式: `private` / `group:<gid>`，`reset_idle_timer(key)` / `cancel_idle_timer(key)`
+- 心跳执行 `run_heartbeat(chat_type, target_id)`：私聊加载 Admin 上下文，群聊加载人格 prompt，共用 `HEARTBEAT.md`
+- 开关：私聊 `data/admin/config.json` 的 `proactive_enabled`（默认开）；群聊群 config.json 的 `proactive_enabled`（默认关）
+- 指令：私聊 `/主动对话 enable|disable`；群聊 `/主动对话 [群号] enable|disable`（仅管理员）
+- 心跳完成后检查开关再决定是否重启计时器（防止禁用后空转循环）
 
-```python
-# plugins/proactive.py
-_idle_tasks: dict[str, asyncio.Task] = {}
-
-def reset_idle_timer(key: str, callback: Callable[[], Awaitable]) -> None: ...
-def cancel_idle_timer(key: str) -> None: ...
-
-async def try_proactive(
-    *,
-    history: list[dict],
-    system_prompt: str,
-    send_fn: Callable[[str], Awaitable],
-    save_fn: Callable[[dict], None],
-) -> None: ...
-```
-
-**群聊额外考虑**:
-- 触发条件更复杂：应该是"Bot 参与过对话后一段时间无人 @Bot"，而非"群内任何消息后"
-- 需要防骚扰：主动发言后无人理，不应再次触发循环
-- 成本控制：对话太短（1-2 轮）时可跳过
+**已知取舍**:
+- 群聊触发条件为"Bot 回复后一段时间"，与私聊相同
+- 防骚扰：回复 `HEARTBEAT_OK` 静默；短回复（≤10 字）不发送
+- 成本控制：心跳只保留最近 30 条消息（`HEARTBEAT_MAX_MESSAGES`）
 
 ### 7. 私聊 / 群聊对话历史接口统一（优先级：低）
 

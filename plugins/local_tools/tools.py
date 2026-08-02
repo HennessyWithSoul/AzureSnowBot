@@ -773,6 +773,31 @@ async def get_group_chat_log(
 # 网络搜索与网页读取工具
 # ──────────────────────────────────────────────────────
 
+async def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
+    """通过 Jina Reader 提取网页正文纯文本（web_read 与 web_search 聚合共用）。
+
+    失败时返回错误提示字符串，供 LLM 直接理解。
+    """
+    import httpx as _httpx
+
+    try:
+        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(
+                f"https://r.jina.ai/{url}",
+                headers={"Accept": "text/plain"},
+            )
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if not text:
+                return f"[错误] 页面内容为空: {url}"
+            # 截断过长内容
+            if len(text) > max_chars:
+                text = text[:max_chars] + f"\n...(内容被截断，共 {len(text)} 字符)"
+            return text
+    except Exception as e:
+        return f"[错误] 读取网页失败: {e}"
+
+
 @register_tool(
     name="web_read",
     description=(
@@ -792,35 +817,17 @@ async def get_group_chat_log(
     },
 )
 async def web_read_tool(url: str = "", **kwargs) -> str:
-    import httpx as _httpx
-
     if not url:
         return "[错误] 请提供 URL"
-
-    try:
-        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(
-                f"https://r.jina.ai/{url}",
-                headers={"Accept": "text/plain"},
-            )
-            resp.raise_for_status()
-            text = resp.text.strip()
-            if not text:
-                return f"[错误] 页面内容为空: {url}"
-            # 截断过长内容
-            if len(text) > 6000:
-                text = text[:6000] + f"\n...(内容被截断，共 {len(text)} 字符)"
-            return text
-    except Exception as e:
-        return f"[错误] 读取网页失败: {e}"
+    return await _fetch_page_text(url, max_chars=6000)
 
 
 @register_tool(
     name="web_search",
     description=(
-        "搜索互联网获取实时信息。"
+        "搜索互联网获取实时信息，默认自动抓取前几个链接的正文摘要。"
         "当用户询问最新新闻、实时数据、或你不确定的事实时使用。"
-        "返回搜索结果的标题、URL 和摘要。"
+        "返回搜索结果的标题、URL、摘要，以及自动读取的页面正文。"
     ),
     parameters={
         "type": "object",
@@ -833,11 +840,15 @@ async def web_read_tool(url: str = "", **kwargs) -> str:
                 "type": "integer",
                 "description": "返回结果数量，默认 5，最多 10",
             },
+            "auto_read": {
+                "type": "boolean",
+                "description": "是否自动抓取前几个链接的正文（默认 true）。只想看搜索结果列表时设为 false",
+            },
         },
         "required": ["query"],
     },
 )
-async def web_search_tool(query: str = "", num_results: int = 5, **kwargs) -> str:
+async def web_search_tool(query: str = "", num_results: int = 5, auto_read: bool = True, **kwargs) -> str:
     import httpx as _httpx
     import re as _re
 
@@ -885,9 +896,29 @@ async def web_search_tool(query: str = "", num_results: int = 5, **kwargs) -> st
             for i, item in enumerate(results, 1):
                 lines.append(f"{i}. {item['title']}\n   {item['url']}\n   {item['desc'][:200]}")
 
-            return f"搜索结果（{query}，{len(results)} 条）:\n\n" + "\n\n".join(lines)
+            base = f"搜索结果（{query}，{len(results)} 条）:\n\n" + "\n\n".join(lines)
     except Exception as e:
         return f"[错误] 搜索失败: {e}"
+
+    # 聚合：自动并发抓取前几个链接的正文，一个 tool result 返回。
+    # 相比让 LLM 逐轮 web_read，把 4-6 轮压缩到 2 轮（搜索 + 回答），
+    # 每轮重发上下文的 token 开销大幅下降。
+    if not auto_read:
+        return base
+
+    import asyncio as _asyncio
+
+    read_limit = min(3, len(results))
+    pages = results[:read_limit]
+    fetched = await _asyncio.gather(
+        *[_fetch_page_text(p["url"], max_chars=1500) for p in pages],
+    )
+
+    sections = []
+    for page, content in zip(pages, fetched):
+        sections.append(f"--- {page['title']} ({page['url']})\n{content}")
+
+    return base + "\n\n[自动读取的前几个链接正文]\n\n" + "\n\n".join(sections)
 
 
 # ──────────────────────────────────────────────────────

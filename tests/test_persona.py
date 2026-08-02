@@ -233,3 +233,30 @@ class TestSessionHistory:
         assert len(cat_history) == 1
         assert len(default_history) == 1
         assert cat_history[0]["content"] == "猫娘消息"
+
+# ──────────────────── 全量监听模式 ────────────────────
+
+class TestListenAll:
+
+    def test_default_off(self, isolated_dirs):
+        assert pm.get_listen_all("999") is False
+
+    def test_set_on_and_read(self, isolated_dirs):
+        pm.set_listen_all("999", True)
+        assert pm.get_listen_all("999") is True
+
+    def test_toggle_off(self, isolated_dirs):
+        pm.set_listen_all("999", True)
+        pm.set_listen_all("999", False)
+        assert pm.get_listen_all("999") is False
+
+    def test_persisted_to_config_json(self, isolated_dirs):
+        """开关应写入群 config.json，重启后仍生效"""
+        pm.set_listen_all("999", True)
+        cfg = pm.get_group_config("999")
+        assert cfg.get("listen_all") is True
+
+    def test_per_group_isolation(self, isolated_dirs):
+        """不同群的监听开关互不影响"""
+        pm.set_listen_all("999", True)
+        assert pm.get_listen_all("888") is False

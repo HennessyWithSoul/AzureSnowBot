@@ -170,6 +170,36 @@ def set_active_persona(group_id: str, persona_name: str) -> None:
     _save_group_config(group_id, config)
 
 
+# ──────────────────── 全量监听模式 ────────────────────
+
+def get_listen_all(group_id: str) -> bool:
+    """该群是否开启全量消息读取模式（bot 读取并回应群里所有消息）"""
+    config = _load_group_config(group_id)
+    return bool(config.get("listen_all", False))
+
+
+def set_listen_all(group_id: str, enabled: bool) -> None:
+    """设置该群的全量消息读取模式"""
+    config = _load_group_config(group_id)
+    config["listen_all"] = bool(enabled)
+    _save_group_config(group_id, config)
+
+
+# ──────────────────── 群聊主动对话开关 ────────────────────
+
+def get_group_proactive(group_id: str) -> bool:
+    """该群是否开启主动对话（心跳主动发言），默认关闭"""
+    config = _load_group_config(group_id)
+    return bool(config.get("proactive_enabled", False))
+
+
+def set_group_proactive(group_id: str, enabled: bool) -> None:
+    """设置该群的主动对话开关"""
+    config = _load_group_config(group_id)
+    config["proactive_enabled"] = bool(enabled)
+    _save_group_config(group_id, config)
+
+
 # ──────────────────── 会话持久化（按 persona 隔离） ────────────────────
 
 def load_history(group_id: str, persona_name: str | None = None) -> list[dict]:

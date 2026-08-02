@@ -10,7 +10,11 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.log import logger
 
 from ..persona.manager import clear_history as pm_clear_history
-from ..persona.manager import get_active_persona, _session_path as persona_session_path
+from ..persona.manager import (
+    get_active_persona, _session_path as persona_session_path,
+    get_listen_all, set_listen_all,
+    get_group_proactive, set_group_proactive,
+)
 from ..mcp.manager import list_tools_summary
 from ..skill.manager import list_skills_summary
 from ..local_tools.manager import list_tools_summary as local_tools_summary
@@ -53,6 +57,124 @@ async def handle_group_compact(event: GroupMessageEvent):
         await group_compact.finish("本群对话历史已压缩。")
     else:
         await group_compact.finish("当前历史不需要压缩。")
+
+
+# ──────────────────── /listen 全量监听切换 ────────────────────
+listen_cmd = on_message(priority=8, block=False)
+
+
+@listen_cmd.handle()
+async def handle_listen(event: GroupMessageEvent):
+    if not in_whitelist(event.group_id):
+        return
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/listen"):
+        return
+    if not is_at_bot(event):
+        return
+
+    # 仅 Bot 管理员可以切换
+    from nonebot import get_driver
+    admin_number = str(getattr(get_driver().config, "admin_number", ""))
+    if not admin_number or str(event.user_id) != admin_number:
+        await listen_cmd.finish(MessageSegment.reply(event.message_id) + "仅 Bot 管理员可以切换监听模式。")
+
+    group_id = str(event.group_id)
+    arg = text[len("/listen"):].strip().lower()
+    if arg in ("on", "开"):
+        enable = True
+    elif arg in ("off", "关"):
+        enable = False
+    else:
+        enable = not get_listen_all(group_id)
+
+    set_listen_all(group_id, enable)
+    state = "已开启：bot 会读取并回应群里所有消息。" if enable else "已关闭：仅响应 @Bot。"
+    await listen_cmd.finish(MessageSegment.reply(event.message_id) + f"全量消息读取模式{state}")
+
+
+# ──────────────────── /白名单 群白名单管理 ────────────────────
+# 注意：不做 in_whitelist 检查 —— 否则管理员无法从新群把它加进白名单。
+# 仅管理员可触发，普通群成员（含非白名单群）调用会被拒绝。
+whitelist_cmd = on_message(priority=8, block=False)
+
+
+@whitelist_cmd.handle()
+async def handle_whitelist(event: GroupMessageEvent):
+    text = event.get_plaintext().strip()
+    if not text.startswith("/白名单"):
+        return
+    if not is_at_bot(event):
+        return
+
+    # 仅 Bot 管理员
+    from nonebot import get_driver
+    admin_number = str(getattr(get_driver().config, "admin_number", ""))
+    if not admin_number or str(event.user_id) != admin_number:
+        await whitelist_cmd.finish(MessageSegment.reply(event.message_id) + "仅 Bot 管理员可以管理白名单。")
+
+    from .utils import handle_whitelist_command
+    reply = handle_whitelist_command(text)
+    await whitelist_cmd.finish(MessageSegment.reply(event.message_id) + reply)
+
+
+# ──────────────────── /主动对话 群聊主动发言开关 ────────────────────
+group_proactive_cmd = on_message(priority=8, block=False)
+
+
+@group_proactive_cmd.handle()
+async def handle_group_proactive(event: GroupMessageEvent):
+    if not in_whitelist(event.group_id):
+        return
+
+    text = event.get_plaintext().strip()
+    if not text.startswith("/主动对话"):
+        return
+    if not is_at_bot(event):
+        return
+
+    # 仅 Bot 管理员可以切换
+    from nonebot import get_driver
+    admin_number = str(getattr(get_driver().config, "admin_number", ""))
+    if not admin_number or str(event.user_id) != admin_number:
+        await group_proactive_cmd.finish(MessageSegment.reply(event.message_id) + "仅 Bot 管理员可以切换主动对话。")
+
+    # 解析参数: /主动对话 [群号] enable|disable（省略群号时作用于当前群）
+    args = text[len("/主动对话"):].strip().split()
+    target_gid = str(event.group_id)
+    action: str | None = None
+    if args:
+        if args[0].isdigit():
+            target_gid = args[0]
+            action = args[1].lower() if len(args) > 1 else None
+        else:
+            action = args[0].lower()
+
+    if action in ("enable", "on", "开"):
+        enable = True
+    elif action in ("disable", "off", "关"):
+        enable = False
+    elif action is None:
+        enable = not get_group_proactive(target_gid)
+    else:
+        await group_proactive_cmd.finish(
+            MessageSegment.reply(event.message_id) + "用法: /主动对话 [群号] enable|disable"
+        )
+
+    set_group_proactive(target_gid, enable)
+
+    # 同步计时器状态
+    from ..proactive import reset_idle_timer, cancel_idle_timer
+    if enable:
+        reset_idle_timer(f"group:{target_gid}")
+    else:
+        cancel_idle_timer(f"group:{target_gid}")
+
+    state = "已开启：bot 会定时主动在群里发言。" if enable else "已关闭。"
+    await group_proactive_cmd.finish(
+        MessageSegment.reply(event.message_id) + f"群 {target_gid} 的主动对话{state}"
+    )
 
 
 # ──────────────────── /取名 ────────────────────
@@ -151,6 +273,9 @@ HELP_TEXT = """/persona — 列出所有人格
 /compact — 压缩对话历史
 /取名 @某人 [条数] — 根据聊天记录起群昵称
 /reset — 清除当前对话历史
+/listen [on|off] — 切换全量消息读取模式（仅管理员）
+/主动对话 [群号] enable|disable — 切换群的主动对话（仅管理员）
+/白名单 list|add <群号>|delete <群号> — 管理群白名单（仅管理员）
 /help — 显示本帮助"""
 
 help_cmd = on_fullmatch("/help", priority=5, block=True)

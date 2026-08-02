@@ -4,12 +4,15 @@ JWT 认证模块
 提供 JWT 签发、验证和 FastAPI 依赖项。
 """
 
+import logging
 import time
 from typing import Annotated
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+logger = logging.getLogger(__name__)
 
 from .config import (
     SECRET_KEY,
@@ -30,12 +33,12 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 
 def authenticate(username: str, password: str) -> bool:
-    """验证用户名和密码"""
+    """验证用户名和密码（凭据来自 .env，不硬编码在代码中）"""
+    if not DASHBOARD_PASSWORD_HASH:
+        logger.warning("未配置 DASHBOARD_PASSWORD_HASH，拒绝登录（请在 .env 中设置）")
+        return False
     if username != DASHBOARD_USER:
         return False
-    if not DASHBOARD_PASSWORD_HASH:
-        # 未配置密码哈希时，使用明文密码 "admin"（仅开发用）
-        return password == "admin"
     return _verify_password(password, DASHBOARD_PASSWORD_HASH)
 
 

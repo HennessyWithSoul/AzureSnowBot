@@ -5,7 +5,8 @@ LLM 统一配置 + Fallback
 当主力模型失败时，自动降级到备用模型。
 
 支持的 provider:
-  - gemini  (默认) → gemini_api_key  / generativelanguage.googleapis.com
+  - deepseek (默认) → deepseek_api_key / api.deepseek.com
+  - gemini          → gemini_api_key  / generativelanguage.googleapis.com
   - openai          → openai_api_key  / api.openai.com
   - qwen            → qwen_api_key    / dashscope.aliyuncs.com
 
@@ -29,8 +30,13 @@ config = get_driver().config
 # ──────────────────── Provider 选择 ────────────────────
 LLM_PROVIDER: str = (
     getattr(config, "llm_provider", "")
-    or os.environ.get("LLM_PROVIDER", "gemini")
+    or os.environ.get("LLM_PROVIDER", "deepseek")
 ).strip().lower()
+
+# ──────────────────── 能力标志 ────────────────────
+# 多模态（识图）：deepseek 暂无视觉模型，向它发 image_url 会报错，需关闭
+_NON_VISION_PROVIDERS = {"deepseek"}
+SUPPORTS_VISION: bool = LLM_PROVIDER not in _NON_VISION_PROVIDERS
 
 # ──────────────────── Provider 配置表 ────────────────────
 _PROVIDERS: dict[str, dict[str, str]] = {
@@ -52,6 +58,12 @@ _PROVIDERS: dict[str, dict[str, str]] = {
         "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "default_model": "qwen3.6-plus-2026-04-02",
     },
+    "deepseek": {
+        "key_attr": "deepseek_api_key",
+        "key_env": "DEEPSEEK_API_KEY",
+        "default_base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-v4-pro",
+    }
 }
 
 

@@ -1,7 +1,7 @@
 """
-proactive 心跳 + 主动发言模块单元测试
+proactive 心跳 + 主动发言引擎单元测试
 ──────────────────────────────────────
-测试空闲计时器的重置/取消逻辑 + 心跳 LLM 决策分支。
+测试 keyed 空闲计时器 + 私聊/群聊心跳执行 + 开关控制。
 """
 
 import sys
@@ -9,10 +9,9 @@ import os
 import types
 import json
 import asyncio
-import importlib
 import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
@@ -34,18 +33,22 @@ _mock_config.proactive_idle_seconds = 1  # 1 秒用于测试
 _mock_driver = MagicMock()
 _mock_driver.config = _mock_config
 sys.modules["nonebot"].get_driver = MagicMock(return_value=_mock_driver)
-sys.modules["nonebot"].get_bot = MagicMock()
+sys.modules["nonebot"].get_bot = MagicMock(return_value=MagicMock())
 
-# ── 构造 plugins / plugins.chat 包 ──
+# ── 构造 plugins 包 ──
 _plugins_pkg = types.ModuleType("plugins")
 _plugins_pkg.__path__ = [str(ROOT / "plugins")]
 _plugins_pkg.__package__ = "plugins"
 sys.modules["plugins"] = _plugins_pkg
 
-_chat_pkg = types.ModuleType("plugins.chat")
-_chat_pkg.__path__ = [str(ROOT / "plugins" / "chat")]
-_chat_pkg.__package__ = "plugins.chat"
-sys.modules["plugins.chat"] = _chat_pkg
+
+def _make_pkg(name: str, path: str) -> types.ModuleType:
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [path]
+    pkg.__package__ = name
+    sys.modules[name] = pkg
+    return pkg
+
 
 # mock plugins.chunker
 _mock_chunker = types.ModuleType("plugins.chunker")
@@ -58,14 +61,13 @@ _mock_llm = types.ModuleType("plugins.llm")
 _mock_llm.API_KEY = "test-key"
 _mock_llm.BASE_URL = "https://test.example.com"
 _mock_llm.MODEL = "test-model"
-_mock_llm.LLM_PROVIDER = "gemini"
+_mock_llm.LLM_PROVIDER = "deepseek"
+_mock_llm.SUPPORTS_VISION = False
 _mock_llm.call_llm = AsyncMock(return_value={"choices": [{"message": {"content": ""}}], "usage": {}})
 sys.modules["plugins.llm"] = _mock_llm
 
 # mock plugins.local_tools.manager
-_mock_lt_pkg = types.ModuleType("plugins.local_tools")
-_mock_lt_pkg.__path__ = [str(ROOT / "plugins" / "local_tools")]
-sys.modules["plugins.local_tools"] = _mock_lt_pkg
+_make_pkg("plugins.local_tools", str(ROOT / "plugins" / "local_tools"))
 _mock_lt_manager = types.ModuleType("plugins.local_tools.manager")
 _mock_lt_manager.get_openai_tools = MagicMock(return_value=[])
 _mock_lt_manager.handle_tool_call = AsyncMock(return_value=None)
@@ -73,9 +75,7 @@ _mock_lt_manager.list_tools_summary = MagicMock(return_value=[])
 sys.modules["plugins.local_tools.manager"] = _mock_lt_manager
 
 # mock plugins.mcp.manager
-_mock_mcp_pkg = types.ModuleType("plugins.mcp")
-_mock_mcp_pkg.__path__ = [str(ROOT / "plugins" / "mcp")]
-sys.modules["plugins.mcp"] = _mock_mcp_pkg
+_make_pkg("plugins.mcp", str(ROOT / "plugins" / "mcp"))
 _mock_mcp_manager = types.ModuleType("plugins.mcp.manager")
 _mock_mcp_manager.get_openai_tools = MagicMock(return_value=[])
 _mock_mcp_manager.call_tool = AsyncMock(return_value="")
@@ -84,312 +84,197 @@ _mock_mcp_manager.list_tools_summary = MagicMock(return_value=[])
 sys.modules["plugins.mcp.manager"] = _mock_mcp_manager
 
 # mock plugins.skill.manager
-_mock_skill_pkg = types.ModuleType("plugins.skill")
-_mock_skill_pkg.__path__ = [str(ROOT / "plugins" / "skill")]
-sys.modules["plugins.skill"] = _mock_skill_pkg
+_make_pkg("plugins.skill", str(ROOT / "plugins" / "skill"))
 _mock_skill_manager = types.ModuleType("plugins.skill.manager")
 _mock_skill_manager.get_openai_tools = MagicMock(return_value=[])
 _mock_skill_manager.handle_tool_call = MagicMock(return_value=None)
 _mock_skill_manager.list_skills_summary = MagicMock(return_value=[])
+_mock_skill_manager.build_catalog_prompt = MagicMock(return_value="")
 sys.modules["plugins.skill.manager"] = _mock_skill_manager
-
-# ── 预设 handler mock（防止 proactive.py 延迟导入时加载真实 handler.py）──
-_default_handler_mock = MagicMock()
-_default_handler_mock.load_history = MagicMock(return_value=[])
-_default_handler_mock.trim_history = MagicMock(side_effect=lambda msgs: msgs[-20:])
-_default_handler_mock.append_message = MagicMock()
-_default_handler_mock.get_config = MagicMock(return_value={"last_message_at": "2026-03-26 11:00:00"})
-_default_handler_mock.load_admin_prompt = MagicMock(return_value="")
-sys.modules["plugins.chat.handler"] = _default_handler_mock
 
 # mock plugins.runtime_context
 _mock_runtime_context = types.ModuleType("plugins.runtime_context")
 _mock_runtime_context.build_runtime_context = MagicMock(return_value="\n当前时间: 2026-03-26 12:00:00（星期四）")
 sys.modules["plugins.runtime_context"] = _mock_runtime_context
 
-# ── 用 importlib 加载 proactive.py ──
-_proactive_path = ROOT / "plugins" / "chat" / "proactive.py"
-_spec = importlib.util.spec_from_file_location("plugins.chat.proactive", _proactive_path)
+# mock plugins.chat.handler（私聊心跳的会话上下文）
+_make_pkg("plugins.chat", str(ROOT / "plugins" / "chat"))
+_mock_handler = MagicMock()
+_mock_handler.load_history = MagicMock(return_value=[])
+_mock_handler.trim_history = MagicMock(side_effect=lambda msgs: msgs)
+_mock_handler.append_message = MagicMock()
+_mock_handler.get_config = MagicMock(return_value={"last_message_at": "2026-03-26 11:00:00"})
+_mock_handler.load_admin_prompt = MagicMock(return_value="你是助手")
+_mock_handler.get_proactive_enabled = MagicMock(return_value=True)
+sys.modules["plugins.chat.handler"] = _mock_handler
+
+# mock plugins.persona.manager + plugins.group.utils（群聊心跳的会话上下文）
+_make_pkg("plugins.persona", str(ROOT / "plugins" / "persona"))
+_mock_persona = MagicMock()
+_mock_persona.get_active_persona = MagicMock(return_value="default")
+_mock_persona.load_history = MagicMock(return_value=[{"role": "assistant", "content": "上一条回复"}])
+_mock_persona.append_message = MagicMock()
+_mock_persona.load_persona_prompt = MagicMock(return_value="群人格 prompt")
+_mock_persona.get_group_config = MagicMock(return_value={"last_message_at": "2026-03-26 11:00:00"})
+_mock_persona.get_group_proactive = MagicMock(return_value=True)
+sys.modules["plugins.persona.manager"] = _mock_persona
+
+_make_pkg("plugins.group", str(ROOT / "plugins" / "group"))
+_mock_group_utils = types.ModuleType("plugins.group.utils")
+_mock_group_utils.trim_history = MagicMock(side_effect=lambda msgs, sp: msgs)
+sys.modules["plugins.group.utils"] = _mock_group_utils
+
+# ── 用 importlib 加载 proactive.py（根级引擎）──
+_spec = importlib.util.spec_from_file_location(
+    "plugins.proactive",
+    ROOT / "plugins" / "proactive.py",
+)
 proactive = importlib.util.module_from_spec(_spec)
-sys.modules["plugins.chat.proactive"] = proactive
+sys.modules["plugins.proactive"] = proactive
 _spec.loader.exec_module(proactive)
 
 
-# ── fixtures ──
-
 @pytest.fixture(autouse=True)
 def _cleanup_timer():
-    """每个测试前后确保计时器被取消，并重置 send_chunked_raw mock。"""
+    """每个测试前后确保所有计时器被取消，并重置 mocks。"""
     _mock_chunker.send_chunked_raw.reset_mock()
+    _mock_handler.reset_mock()
+    _mock_persona.reset_mock()
+    _mock_llm.call_llm.reset_mock()
     yield
-    proactive.cancel_idle_timer()
+    for key in list(proactive._idle_tasks):
+        proactive.cancel_idle_timer(key)
 
-
-@pytest.fixture
-def tmp_session_dir(tmp_path):
-    """创建临时会话目录，并 mock handler 的相关函数。"""
-    session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
-    return session_dir
-
-
-# ── 辅助 ──
-
-def _make_history(tmp_dir: Path, messages: list[dict]) -> None:
-    """向临时文件写入对话历史。"""
-    path = tmp_dir / "373900859.jsonl"
-    with path.open("w", encoding="utf-8") as f:
-        for msg in messages:
-            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-
-def _setup_handler_mock(tmp_dir: Path, messages: list[dict],
-                        admin_prompt: str = "", system_prompt: str = "你是助手"):
-    """设置 handler mock 到 sys.modules 并返回 mock 对象。"""
-    _make_history(tmp_dir, messages)
-
-    def load_history(uid):
-        path = tmp_dir / f"{uid}.jsonl"
-        if not path.exists():
-            return []
-        result = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                result.append(json.loads(line))
-        return result
-
-    def trim_history(msgs):
-        return msgs[-20:]  # 简化版
-
-    mock_handler = MagicMock()
-    mock_handler.load_history = MagicMock(side_effect=load_history)
-    mock_handler.trim_history = MagicMock(side_effect=trim_history)
-    mock_handler.append_message = MagicMock()
-    mock_handler.get_config = MagicMock(return_value={"last_message_at": "2026-03-26 11:00:00"})
-    mock_handler.load_admin_prompt = MagicMock(return_value=admin_prompt or system_prompt)
-    sys.modules["plugins.chat.handler"] = mock_handler
-    return mock_handler
-
-
-# ── helper: 构造 call_llm mock ──
 
 def _mock_call_llm(reply_content: str):
-    """返回一个 AsyncMock，模拟 call_llm 返回指定回复"""
+    """让 call_llm 返回指定回复"""
     async def _fake_call_llm(messages, *, tools=None, source="unknown", timeout=120):
         return {"choices": [{"message": {"content": reply_content}}], "usage": {}}
-    return _fake_call_llm
+    _mock_llm.call_llm = AsyncMock(side_effect=_fake_call_llm)
 
 
 # ══════════════════════════════════════════════════════
-# 测试
+# 计时器（按 key）
 # ══════════════════════════════════════════════════════
-
 
 class TestIdleTimer:
-    """计时器重置 / 取消测试"""
 
-    @pytest.mark.asyncio
     async def test_reset_creates_task(self):
-        proactive.reset_idle_timer()
-        assert proactive._idle_task is not None
-        assert not proactive._idle_task.done()
+        proactive.reset_idle_timer("private")
+        assert "private" in proactive._idle_tasks
+        assert not proactive._idle_tasks["private"].done()
 
-    @pytest.mark.asyncio
     async def test_cancel_clears_task(self):
-        proactive.reset_idle_timer()
-        proactive.cancel_idle_timer()
-        assert proactive._idle_task is None
+        proactive.reset_idle_timer("private")
+        proactive.cancel_idle_timer("private")
+        assert "private" not in proactive._idle_tasks
 
-    @pytest.mark.asyncio
-    async def test_reset_cancels_previous_task(self):
-        proactive.reset_idle_timer()
-        old_task = proactive._idle_task
-        proactive.reset_idle_timer()
-        # cancel() 已调用，但需要让 event loop 跑一轮才能完成取消
-        await asyncio.sleep(0)
-        assert old_task.cancelled()
-        assert proactive._idle_task is not old_task
+    async def test_keys_are_independent(self):
+        proactive.reset_idle_timer("private")
+        proactive.reset_idle_timer("group:123")
+        assert "private" in proactive._idle_tasks
+        assert "group:123" in proactive._idle_tasks
 
-    @pytest.mark.asyncio
-    async def test_cancel_is_idempotent(self):
-        proactive.cancel_idle_timer()
-        proactive.cancel_idle_timer()  # 不应出错
+    async def test_reset_while_running_defers_to_min(self):
+        """剩余时间 < MIN_DEFER 时延后到 MIN_DEFER_SECONDS"""
+        proactive.reset_idle_timer("private")  # IDLE_SECONDS=1
+        deadline1 = proactive._idle_deadlines["private"]
+        proactive.reset_idle_timer("private")  # remaining ≈ 1s < 600s → 延后
+        assert proactive._idle_deadlines["private"] >= deadline1
+        assert proactive._idle_deadlines["private"] >= proactive._now() + 500
+
+    async def test_cancel_nonexistent_no_error(self):
+        proactive.cancel_idle_timer("group:999")  # 不应报错
 
 
-class TestHeartbeatDecision:
-    """心跳 LLM 决策分支测试"""
+# ══════════════════════════════════════════════════════
+# 私聊心跳
+# ══════════════════════════════════════════════════════
 
-    @pytest.mark.asyncio
-    async def test_no_history_does_not_crash(self, tmp_session_dir):
-        """对话历史为空时，心跳仍可正常运行。"""
-        _setup_handler_mock(tmp_session_dir, [])
-        with patch("plugins.llm.call_llm", new=_mock_call_llm("HEARTBEAT_OK")):
-            await proactive._try_heartbeat()
+class TestHeartbeatPrivate:
+
+    async def test_heartbeat_ok_is_silent(self):
+        _mock_call_llm("HEARTBEAT_OK")
+        await proactive.run_heartbeat("private", "373900859")
+        _mock_chunker.send_chunked_raw.assert_not_awaited()
+        _mock_handler.append_message.assert_not_called()
+
+    async def test_heartbeat_sends_message(self):
+        _mock_call_llm("记得喝水哦，保重身体呀")
+        await proactive.run_heartbeat("private", "373900859")
+        _mock_chunker.send_chunked_raw.assert_awaited_once()
+        args = _mock_chunker.send_chunked_raw.await_args.args
+        assert args[1] == "private"
+        assert "记得喝水哦" in args[3]
+        _mock_handler.append_message.assert_called_once()
+
+    async def test_disabled_flag_no_send(self):
+        _mock_handler.get_proactive_enabled.return_value = False
+        _mock_call_llm("记得喝水哦")
+        await proactive.run_heartbeat("private", "373900859")
+        _mock_llm.call_llm.assert_not_awaited()
         _mock_chunker.send_chunked_raw.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_last_msg_not_assistant_skips(self, tmp_session_dir):
-        """最后一条消息不是 assistant 时跳过。"""
-        _setup_handler_mock(tmp_session_dir, [{"role": "user", "content": "你好"}])
-        await proactive._try_heartbeat()
+    async def test_history_not_ending_with_assistant_skips(self):
+        """历史最后一条不是 assistant（对话中途）时跳过心跳"""
+        _mock_handler.load_history.return_value = [{"role": "user", "content": "在吗"}]
+        _mock_call_llm("记得喝水哦")
+        await proactive.run_heartbeat("private", "373900859")
+        _mock_llm.call_llm.assert_not_awaited()
+
+
+# ══════════════════════════════════════════════════════
+# 群聊心跳
+# ══════════════════════════════════════════════════════
+
+class TestHeartbeatGroup:
+
+    async def test_group_heartbeat_sends(self):
+        _mock_call_llm("大家今天怎么样？都还好吗")
+        await proactive.run_heartbeat("group", "123")
+        _mock_chunker.send_chunked_raw.assert_awaited_once()
+        args = _mock_chunker.send_chunked_raw.await_args.args
+        assert args[1] == "group"
+        assert args[2] == 123
+        assert "大家今天怎么样？" in args[3]
+        # 写入该群当前人格的历史
+        _mock_persona.append_message.assert_called_once()
+        call = _mock_persona.append_message.call_args
+        assert call.args[0] == "123"
+        assert call.args[2] == "default"
+
+    async def test_group_disabled_no_send(self):
+        _mock_persona.get_group_proactive.return_value = False
+        _mock_call_llm("大家今天怎么样？")
+        await proactive.run_heartbeat("group", "123")
+        _mock_llm.call_llm.assert_not_awaited()
         _mock_chunker.send_chunked_raw.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_llm_says_heartbeat_ok(self, tmp_session_dir):
-        """LLM 回复 HEARTBEAT_OK → 不发消息。"""
-        _setup_handler_mock(tmp_session_dir, [
-            {"role": "user", "content": "今天天气真好"},
-            {"role": "assistant", "content": "是啊，阳光明媚"},
-        ], admin_prompt="你是绘名")
+    async def test_group_persona_missing_skips(self):
+        _mock_persona.load_persona_prompt.return_value = None
+        _mock_call_llm("大家今天怎么样？")
+        await proactive.run_heartbeat("group", "123")
+        _mock_llm.call_llm.assert_not_awaited()
 
-        with patch("plugins.llm.call_llm", new=_mock_call_llm("HEARTBEAT_OK")):
-            await proactive._try_heartbeat()
-
-        _mock_chunker.send_chunked_raw.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_llm_sends_message(self, tmp_session_dir):
-        """LLM 有话说 → 发送消息并写入历史。"""
-        handler_mock = _setup_handler_mock(tmp_session_dir, [
-            {"role": "user", "content": "晚安"},
-            {"role": "assistant", "content": "晚安，做个好梦"},
-        ], admin_prompt="你是绘名")
-
-        proactive_reply = "话说你昨天画的那幅画完成了吗？"
-        mock_bot = AsyncMock()
-
-        with patch("plugins.llm.call_llm", new=_mock_call_llm(proactive_reply)), \
-             patch("plugins.chat.proactive.get_bot", return_value=mock_bot):
-            await proactive._try_heartbeat()
-
-        _mock_chunker.send_chunked_raw.assert_awaited_once_with(
-            mock_bot, "private", 373900859, proactive_reply
-        )
-        handler_mock.append_message.assert_called_once_with(
-            "373900859", {"role": "assistant", "content": proactive_reply}
-        )
-
-    @pytest.mark.asyncio
-    async def test_llm_empty_reply_skips(self, tmp_session_dir):
-        """LLM 回复空字符串 → 不发消息。"""
-        _setup_handler_mock(tmp_session_dir, [
-            {"role": "user", "content": "嗯"},
-            {"role": "assistant", "content": "嗯嗯"},
-        ])
-
-        with patch("plugins.llm.call_llm", new=_mock_call_llm("")):
-            await proactive._try_heartbeat()
-
-        _mock_chunker.send_chunked_raw.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_uses_admin_prompt_when_available(self, tmp_session_dir):
-        """有 ADMIN_PROMPT 时应使用它作为 system prompt。"""
-        _setup_handler_mock(tmp_session_dir, [
-            {"role": "user", "content": "你好"},
-            {"role": "assistant", "content": "你好呀"},
-        ], admin_prompt="你是東雲絵名")
-
-        captured_messages = []
-        async def _capture_call_llm(messages, *, tools=None, source="unknown", timeout=120):
-            captured_messages.extend(messages)
-            return {"choices": [{"message": {"content": "NO"}}], "usage": {}}
-
-        with patch("plugins.llm.call_llm", new=_capture_call_llm):
-            await proactive._try_heartbeat()
-
-        system_msg = captured_messages[0]
-        assert system_msg["role"] == "system"
-        assert system_msg["content"].startswith("你是東雲絵名")
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_instruction_appended(self, tmp_session_dir):
-        """心跳指令应追加到消息末尾。"""
-        _setup_handler_mock(tmp_session_dir, [
-            {"role": "user", "content": "你好"},
-            {"role": "assistant", "content": "你好呀"},
-        ], admin_prompt="你是绘名")
-
-        captured_messages = []
-        async def _capture_call_llm(messages, *, tools=None, source="unknown", timeout=120):
-            captured_messages.extend(messages)
-            return {"choices": [{"message": {"content": "NO"}}], "usage": {}}
-
-        with patch("plugins.llm.call_llm", new=_capture_call_llm):
-            await proactive._try_heartbeat()
-
-        last_msg = captured_messages[-1]
-        assert last_msg["role"] == "user"
-        assert "心跳" in last_msg["content"] or "HEARTBEAT" in last_msg["content"]
-
-    @pytest.mark.asyncio
-    async def test_no_api_key_skips(self):
-        """API_KEY 为空时跳过。"""
-        original = proactive.API_KEY
-        try:
-            proactive.API_KEY = ""
-            await proactive._try_heartbeat()
-            _mock_chunker.send_chunked_raw.assert_not_awaited()
-        finally:
-            proactive.API_KEY = original
-
-    @pytest.mark.asyncio
-    async def test_no_admin_number_skips(self):
-        """ADMIN_NUMBER 为空时跳过。"""
-        original = proactive.ADMIN_NUMBER
-        try:
-            proactive.ADMIN_NUMBER = ""
-            await proactive._try_heartbeat()
-            _mock_chunker.send_chunked_raw.assert_not_awaited()
-        finally:
-            proactive.ADMIN_NUMBER = original
+    async def test_group_history_not_ending_with_assistant_skips(self):
+        _mock_persona.load_history.return_value = [{"role": "user", "content": "有人吗"}]
+        _mock_call_llm("大家今天怎么样？")
+        await proactive.run_heartbeat("group", "123")
+        _mock_llm.call_llm.assert_not_awaited()
 
 
-class TestTimerIntegration:
-    """计时器到期后的集成流程测试"""
+# ══════════════════════════════════════════════════════
+# key 解析
+# ══════════════════════════════════════════════════════
 
-    @pytest.mark.asyncio
-    async def test_timer_fires_after_idle(self):
-        """计时器到期后应触发心跳。"""
-        with patch.object(proactive, "_try_heartbeat", new_callable=AsyncMock) as mock_try:
-            proactive.IDLE_SECONDS = 0.15
-            proactive.MIN_DEFER_SECONDS = 0.05
-            proactive.reset_idle_timer()
-            await asyncio.sleep(0.1)
-            mock_try.assert_not_awaited()
-            await asyncio.sleep(0.1)  # 总共 0.2s > 0.15s
-            assert mock_try.await_count >= 1
-            proactive.cancel_idle_timer()
-            proactive.IDLE_SECONDS = 1
-            proactive.MIN_DEFER_SECONDS = 600
+class TestKeyParse:
 
-    @pytest.mark.asyncio
-    async def test_reset_during_chat_defers_to_min(self):
-        """聊天中重置计时器，应延后到 MIN_DEFER_SECONDS 而非完全重置。"""
-        with patch.object(proactive, "_try_heartbeat", new_callable=AsyncMock) as mock_try:
-            proactive.IDLE_SECONDS = 0.2
-            proactive.MIN_DEFER_SECONDS = 0.1
-            proactive.reset_idle_timer()        # deadline = now + 0.2s
-            await asyncio.sleep(0.15)           # 剩余 0.05s < MIN_DEFER(0.1s)
-            proactive.reset_idle_timer()        # 延后到 now + 0.1s
-            await asyncio.sleep(0.05)           # 距延后仅 0.05s
-            mock_try.assert_not_awaited()       # 还没到
-            await asyncio.sleep(0.1)            # 距延后 0.15s > 0.1s
-            mock_try.assert_awaited_once()
-            proactive.IDLE_SECONDS = 1
-            proactive.MIN_DEFER_SECONDS = 600
+    def test_private_key(self):
+        assert proactive._parse_key("private") == ("private", "373900859")
 
-    @pytest.mark.asyncio
-    async def test_reset_keeps_deadline_when_plenty_remaining(self):
-        """剩余时间充足时，reset 不改变 deadline。"""
-        with patch.object(proactive, "_try_heartbeat", new_callable=AsyncMock) as mock_try:
-            proactive.IDLE_SECONDS = 0.3
-            proactive.MIN_DEFER_SECONDS = 0.05
-            proactive.reset_idle_timer()        # deadline = now + 0.3s
-            await asyncio.sleep(0.05)           # 剩余 0.25s > MIN_DEFER(0.05s)
-            old_deadline = proactive._idle_deadline
-            proactive.reset_idle_timer()        # 不应改变
-            assert proactive._idle_deadline == old_deadline
-            proactive.cancel_idle_timer()
-            proactive.IDLE_SECONDS = 1
-            proactive.MIN_DEFER_SECONDS = 600
+    def test_group_key(self):
+        assert proactive._parse_key("group:123") == ("group", "123")
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ValueError):
+            proactive._parse_key("bogus")

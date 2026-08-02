@@ -21,6 +21,9 @@
 | @Bot `/skill reload` | 重新扫描技能目录 |
 | @Bot `/compact` | 压缩对话历史（手动触发） |
 | @Bot `/取名 @某人 [条数]` | 根据聊天记录起群昵称 |
+| @Bot `/listen [on\|off]` | 切换全量消息读取模式（仅管理员）：开启后 bot 读取并回应群里所有消息，不再需要 @ |
+| @Bot `/主动对话 [群号] enable\|disable` | 切换该群主动对话（仅管理员）：开启后 bot 定时主动在群里发言 |
+| @Bot `/白名单 list\|add <群号>\|delete <群号>` | 管理群白名单（仅管理员，任意群可用，无需该群在白名单内） |
 | @Bot `/help` | 显示帮助信息 |
 
 ### 私聊（仅 Admin）
@@ -32,6 +35,8 @@
 | 任意消息 | 调用 LLM 进行多轮对话（支持引用消息 + 完整工具链） |
 | `/reset` | 清空对话历史 |
 | `/compact` | 压缩对话历史（手动触发压缩 + 记忆提取） |
+| `/主动对话 enable\|disable` | 切换私聊主动对话（Bot 空闲时主动给管理员发消息） |
+| `/白名单 list\|add <群号>\|delete <群号>` | 管理群白名单（仅管理员） |
 
 ### 人格系统
 
@@ -135,10 +140,11 @@ Admin 私聊拥有与群聊一致的完整工具链（Skill + 本地工具 + MCP
 
 ### 心跳 + 主动发言（Heartbeat + Proactive Messaging）
 
-Admin 私聊专属功能 —— 定时唤醒 LLM，让它自主决定做什么：
+定时唤醒 LLM，让它自主决定做什么。支持 **Admin 私聊** 和 **群聊**（统一引擎 `plugins/proactive.py`）：
 
-- Bot 启动时自动开启心跳计时器（默认 1 小时，可通过 `PROACTIVE_IDLE_SECONDS` 配置）
-- 计时器到期后，加载完整上下文 + `HEARTBEAT.md` 任务清单 + 完整工具链
+- Bot 启动时自动为开启的会话启动心跳计时器（默认 1 小时，可通过 `PROACTIVE_IDLE_SECONDS` 配置）
+- 私聊默认开启；群聊默认关闭，通过 `/主动对话 {群号} enable` 开启（仅管理员）
+- 计时器到期后，加载会话上下文（私聊 = Admin 上下文文件，群聊 = 人格 prompt）+ `HEARTBEAT.md` 任务清单 + 完整工具链
 - LLM 可以：调用工具整理记忆（用户无感）、主动发消息（写入历史并发送）、或回复 `HEARTBEAT_OK`（静默）
 - 对话期间计时器不会完全重置，而是取 max(10分钟, 剩余时间)，确保心跳不会因频繁聊天而永远不触发
 - `HEARTBEAT.md` 可随时修改，无需重启 Bot
@@ -193,7 +199,7 @@ data/skills/<skill-name>/
 - **认证**：JWT (PyJWT + bcrypt)，支持公网访问
 - **开发模式**：`cd web && npm run dev` → `localhost:5173`，Vite 代理 API 到后端
 - **生产模式**：`cd web && npm run build` → `web/dist/`，访问 `http://host:8082/dashboard/`
-- **默认登录**：用户名 `admin`，密码 `admin`（可通过 `.env` 配置 bcrypt 哈希）
+- **登录凭据**：全部配置在 `.env`（`DASHBOARD_USER` + `DASHBOARD_PASSWORD_HASH`），代码不硬编码密码；未配置哈希时拒绝登录
 
 ## 技术栈
 
@@ -349,10 +355,11 @@ GROUP_WHITELIST=["群号1", "群号2"]
 ADMIN_NUMBER=你的QQ号
 ```
 
-支持三家 LLM 服务商，均通过 OpenAI 兼容接口调用：
+支持多家 LLM 服务商，均通过 OpenAI 兼容接口调用（默认 deepseek）：
 
 | Provider | 默认模型 | 默认 Base URL | 所需 Key 变量 |
 |----------|----------|-------------|------------|
+| `deepseek`（默认） | `deepseek-v4-pro` | `api.deepseek.com` | `deepseek_api_key` |
 | `gemini` | `gemini-3-flash-preview` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini_api_key` |
 | `openai` | `gpt-5.4` | `api.openai.com/v1` | `openai_api_key` |
 | `qwen` | `qwen-plus` | `dashscope.aliyuncs.com/compatible-mode/v1` | `qwen_api_key` |
@@ -361,14 +368,14 @@ ADMIN_NUMBER=你的QQ号
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `LLM_PROVIDER` | LLM 服务商 | `gemini` |
+| `LLM_PROVIDER` | LLM 服务商 | `deepseek` |
 | `LLM_MODEL` | （可选）覆盖默认模型名称 | 按 provider 自动选择 |
 | `LLM_BASE_URL` | （可选）覆盖默认接口地址 | 按 provider 自动选择 |
 | `GROUP_WHITELIST` | 允许使用的群号列表（JSON 数组） | `[]`（空 = 不响应任何群） |
 | `ADMIN_NUMBER` | 管理员 QQ 号，仅该用户可以私聊 Bot | 空 |
 | `PROACTIVE_IDLE_SECONDS` | Admin 私聊主动发言空闲等待秒数 | `3600`（1 小时） |
-| `DASHBOARD_USER` | Dashboard 登录用户名 | `admin` |
-| `DASHBOARD_PASSWORD_HASH` | Dashboard 密码 bcrypt 哈希（留空则默认密码 admin） | 空 |
+| `DASHBOARD_USER` | Dashboard 登录用户名 | `373900859` |
+| `DASHBOARD_PASSWORD_HASH` | Dashboard 密码 bcrypt 哈希（留空则拒绝登录） | 空 |
 | `DASHBOARD_SECRET_KEY` | JWT 签名密钥（留空则每次重启随机生成） | 空 |
 
 2. 配置 Admin 上下文文件（可选，按需编辑）：

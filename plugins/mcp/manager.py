@@ -41,8 +41,9 @@ _shutdown_event: asyncio.Event | None = None
 _mcp_loop: asyncio.AbstractEventLoop | None = None
 _mcp_thread: threading.Thread | None = None
 
-# 工具调用最大轮次，防止无限循环
-MAX_TOOL_ROUNDS = 10
+# 工具调用最大轮次，防止无限循环。
+# 20 轮：web_search 聚合后单次搜索只需 2 轮，20 轮可覆盖多次搜索 + 多次页面读取
+MAX_TOOL_ROUNDS = 20
 
 
 # ──────────────────── 配置加载 ────────────────────
