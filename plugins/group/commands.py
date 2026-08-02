@@ -20,7 +20,6 @@ from ..persona.manager import (
     load_persona_prompt, get_group_config, group_memory_path,
 )
 from ..mcp.manager import list_tools_summary
-from ..skill.manager import list_skills_summary
 from ..local_tools.manager import list_tools_summary as local_tools_summary
 from ..runtime_context import build_runtime_context
 from .utils import in_whitelist, is_at_bot, is_group_event
@@ -367,9 +366,7 @@ async def handle_help(event: GroupMessageEvent):
     tool_lines = list_tools_summary()
     if tool_lines:
         text += "\n\n可用工具（由 MCP 提供，模型自动调用）：\n" + "\n".join(tool_lines)
-    skill_lines = list_skills_summary()
-    if skill_lines:
-        text += "\n\n已加载技能（渐进式披露，模型按需加载）：\n" + "\n".join(skill_lines)
+    # 群聊 /help 不展示技能列表（太长），技能由模型在对话中按需加载
     local_lines = local_tools_summary()
     if local_lines:
         text += "\n\n本地工具（模型自动调用）：\n" + "\n".join(local_lines)
