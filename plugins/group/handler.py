@@ -56,8 +56,9 @@ async def handle_group_chat(event: GroupMessageEvent):
 
     group_id = str(event.group_id)
 
-    # 全量监听模式：读取并回应群里所有消息；否则仅响应 @Bot
-    if not is_at_bot(event) and not get_listen_all(group_id):
+    # 回复触发仅看 @Bot。全量监听（/listen on）只影响上下文加载
+    # （chatlog 旁路记录器会把全量消息写入会话历史），不改变回复触发。
+    if not is_at_bot(event):
         return
 
     # 忽略 Bot 自己发出的消息（全量模式下避免自我触发循环）

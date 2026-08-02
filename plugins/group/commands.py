@@ -91,8 +91,8 @@ async def handle_listen(event: GroupMessageEvent):
         enable = not get_listen_all(group_id)
 
     set_listen_all(group_id, enable)
-    state = "已开启：bot 会读取并回应群里所有消息。" if enable else "已关闭：仅响应 @Bot。"
-    await listen_cmd.finish(MessageSegment.reply(event.message_id) + f"全量消息读取模式{state}")
+    state = "已开启：回复 @Bot 时加载全量群聊上下文。" if enable else "已关闭：仅记录 @Bot 消息。"
+    await listen_cmd.finish(MessageSegment.reply(event.message_id) + f"全量上下文模式{state}")
 
 
 # ──────────────────── /白名单 群白名单管理 ────────────────────
@@ -274,7 +274,7 @@ HELP_TEXT = """/persona — 列出所有人格
 /compact — 压缩对话历史
 /取名 @某人 [条数] — 根据聊天记录起群昵称
 /reset — 清除当前对话历史
-/listen [on|off] — 切换全量消息读取模式（仅管理员）
+/listen [on|off] — 切换全量上下文模式：开启后 @Bot 回复加载全量群聊消息（仅管理员）
 /主动对话 [群号] enable|disable — 切换群的主动对话（仅管理员）
 /白名单 list|add <群号>|delete <群号> — 管理群白名单（仅管理员）
 /help — 显示本帮助"""

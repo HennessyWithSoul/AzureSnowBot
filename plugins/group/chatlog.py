@@ -16,7 +16,8 @@ from nonebot import on_message
 from nonebot.adapters.onebot.v11 import GroupMessageEvent
 from nonebot.log import logger
 
-from .utils import is_group_event, in_whitelist
+from .utils import is_group_event, in_whitelist, is_at_bot
+from ..persona.manager import get_listen_all
 
 CHATLOG_DIR = Path("data/sessions/groups")
 CHATLOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -159,3 +160,18 @@ async def _record_group_message(event: GroupMessageEvent):
     nickname = event.sender.nickname or user_id
 
     append_chatlog(group_id, user_id, nickname, text)
+
+    # 全量上下文模式（/listen on）：把非 @Bot 的群消息也写入会话历史，
+    # 使 @Bot 回复时能加载全量群聊上下文。@Bot 消息由 handler 记录（格式更完整）。
+    if (
+        user_id != str(event.self_id)
+        and not is_at_bot(event)
+        and get_listen_all(group_id)
+    ):
+        from ..persona.manager import get_active_persona, append_message
+        persona = get_active_persona(group_id)
+        append_message(
+            group_id,
+            {"role": "user", "content": f"[{nickname}]: {text}"},
+            persona,
+        )
