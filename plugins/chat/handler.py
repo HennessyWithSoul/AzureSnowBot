@@ -262,7 +262,7 @@ async def handle_compact(event: PrivateMessageEvent):
 
 
 # ──────────────────── 主动对话开关指令 ────────────────────
-proactive_cmd = on_message(rule=is_private_event, priority=10, block=True)
+proactive_cmd = on_message(rule=is_private_event, priority=10, block=False)
 
 
 @proactive_cmd.handle()
@@ -311,7 +311,7 @@ async def handle_help(event: PrivateMessageEvent):
 
 
 # ──────────────────── /白名单 群白名单管理（私聊） ────────────────────
-whitelist_cmd = on_message(rule=is_private_event, priority=10, block=True)
+whitelist_cmd = on_message(rule=is_private_event, priority=10, block=False)
 
 
 @whitelist_cmd.handle()
