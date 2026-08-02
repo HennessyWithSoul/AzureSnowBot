@@ -13,6 +13,8 @@
 from datetime import datetime
 from pathlib import Path
 
+from nonebot.log import logger
+
 from .manager import register_tool
 
 # ──────────────────────────────────────────────────────
@@ -773,13 +775,31 @@ async def get_group_chat_log(
 # 网络搜索与网页读取工具
 # ──────────────────────────────────────────────────────
 
-async def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
-    """通过 Jina Reader 提取网页正文纯文本（web_read 与 web_search 聚合共用）。
+def _strip_html(html: str) -> str:
+    """粗暴提取 HTML 纯文本（直连抓取 fallback 用）"""
+    import re as _re
+    text = _re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
+    text = _re.sub(r"(?s)<[^>]+>", " ", text)
+    text = _re.sub(r"&nbsp;?", " ", text)
+    text = _re.sub(r"\s+", " ", text)
+    return text.strip()
 
-    失败时返回错误提示字符串，供 LLM 直接理解。
+
+def _truncate(text: str, max_chars: int, url: str) -> str:
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n...(内容被截断，共 {len(text)} 字符)"
+    return text
+
+
+async def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
+    """提取网页正文纯文本（web_read 与 web_search 聚合共用）。
+
+    Jina Reader 优先（正文提取质量好）；国内网络不可达时降级为直连抓取
+    并剥离 HTML 标签。失败返回错误提示字符串，供 LLM 直接理解。
     """
     import httpx as _httpx
 
+    # 1) Jina Reader
     try:
         async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             resp = await client.get(
@@ -788,12 +808,23 @@ async def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
             )
             resp.raise_for_status()
             text = resp.text.strip()
+            if text:
+                return _truncate(text, max_chars, url)
+    except Exception:
+        pass  # Jina 不可达/失败 → 直连 fallback
+
+    # 2) 直连抓取（剥离 HTML 标签）
+    try:
+        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            )
+            resp.raise_for_status()
+            text = _strip_html(resp.text)
             if not text:
                 return f"[错误] 页面内容为空: {url}"
-            # 截断过长内容
-            if len(text) > max_chars:
-                text = text[:max_chars] + f"\n...(内容被截断，共 {len(text)} 字符)"
-            return text
+            return _truncate(text, max_chars, url)
     except Exception as e:
         return f"[错误] 读取网页失败: {e}"
 
@@ -820,6 +851,78 @@ async def web_read_tool(url: str = "", **kwargs) -> str:
     if not url:
         return "[错误] 请提供 URL"
     return await _fetch_page_text(url, max_chars=6000)
+
+
+def _rss_text(el, name: str) -> str:
+    """从 RSS 元素取子元素文本（兼容带/不带命名空间）"""
+    for child in el:
+        if child.tag.split("}")[-1] == name:
+            return (child.text or "").strip()
+    return ""
+
+
+async def _bing_search(query: str, num_results: int) -> list[dict]:
+    """Bing RSS 搜索（国内可达，免 API key）"""
+    import httpx as _h
+
+    async with _h.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://www.bing.com/search",
+            params={"format": "rss", "q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+
+    import xml.etree.ElementTree as _ET
+    root = _ET.fromstring(resp.content)
+    results: list[dict] = []
+    for el in root.iter():
+        if el.tag.split("}")[-1] != "item":
+            continue
+        title = _rss_text(el, "title")
+        url = _rss_text(el, "link")
+        desc = _rss_text(el, "description")
+        if not title and not url:
+            continue
+        desc = _strip_html(desc) if desc else ""
+        results.append({"title": title, "url": url, "desc": desc})
+        if len(results) >= num_results:
+            break
+    return results
+
+
+async def _ddg_search(query: str, num_results: int) -> list[dict]:
+    """DuckDuckGo HTML 搜索（免费，无需 API key）"""
+    import httpx as _h
+    import re as _re2
+
+    async with _h.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        html = resp.text
+
+    results: list[dict] = []
+    result_blocks = _re2.findall(
+        r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
+        r'class="result__snippet"[^>]*>(.*?)</(?:a|span)',
+        html, _re2.DOTALL,
+    )
+    for href, raw_title, raw_desc in result_blocks[:num_results]:
+        title = _re2.sub(r"<[^>]+>", "", raw_title).strip()
+        desc = _re2.sub(r"<[^>]+>", "", raw_desc).strip()
+        # DuckDuckGo 的 href 是重定向 URL，提取真实 URL
+        url_match = _re2.search(r"uddg=([^&]+)", href)
+        if url_match:
+            from urllib.parse import unquote
+            url = unquote(url_match.group(1))
+        else:
+            url = href
+        results.append({"title": title, "url": url, "desc": desc})
+    return results
 
 
 @register_tool(
@@ -850,55 +953,33 @@ async def web_read_tool(url: str = "", **kwargs) -> str:
 )
 async def web_search_tool(query: str = "", num_results: int = 5, auto_read: bool = True, **kwargs) -> str:
     import httpx as _httpx
-    import re as _re
 
     if not query:
         return "[错误] 请提供搜索关键词"
 
     num_results = max(1, min(10, num_results))
 
-    # 使用 DuckDuckGo HTML 搜索（免费，无需 API key）
+    # 多源搜索：Bing RSS 优先（国内可达），失败降级 DuckDuckGo
     try:
-        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            resp.raise_for_status()
-            html = resp.text
-
-            # 从 HTML 中提取搜索结果
-            results: list[dict] = []
-            # 匹配结果块：<a class="result__a" href="...">title</a> + <a class="result__snippet">desc</a>
-            result_blocks = _re.findall(
-                r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
-                r'class="result__snippet"[^>]*>(.*?)</(?:a|span)',
-                html, _re.DOTALL,
-            )
-
-            for href, raw_title, raw_desc in result_blocks[:num_results]:
-                title = _re.sub(r"<[^>]+>", "", raw_title).strip()
-                desc = _re.sub(r"<[^>]+>", "", raw_desc).strip()
-                # DuckDuckGo 的 href 是重定向 URL，提取真实 URL
-                url_match = _re.search(r"uddg=([^&]+)", href)
-                if url_match:
-                    from urllib.parse import unquote
-                    url = unquote(url_match.group(1))
-                else:
-                    url = href
-                results.append({"title": title, "url": url, "desc": desc})
-
-            if not results:
-                return f"未找到与「{query}」相关的搜索结果"
-
-            lines: list[str] = []
-            for i, item in enumerate(results, 1):
-                lines.append(f"{i}. {item['title']}\n   {item['url']}\n   {item['desc'][:200]}")
-
-            base = f"搜索结果（{query}，{len(results)} 条）:\n\n" + "\n\n".join(lines)
+        results = await _bing_search(query, num_results)
     except Exception as e:
-        return f"[错误] 搜索失败: {e}"
+        logger.warning(f"Bing 搜索失败，降级 DuckDuckGo: {e}")
+        results = []
+
+    if not results:
+        try:
+            results = await _ddg_search(query, num_results)
+        except Exception as e:
+            return f"[错误] 搜索失败: {e}"
+
+    if not results:
+        return f"未找到与「{query}」相关的搜索结果"
+
+    lines: list[str] = []
+    for i, item in enumerate(results, 1):
+        lines.append(f"{i}. {item['title']}\n   {item['url']}\n   {item['desc'][:200]}")
+
+    base = f"搜索结果（{query}，{len(results)} 条）:\n\n" + "\n\n".join(lines)
 
     # 聚合：自动并发抓取前几个链接的正文，一个 tool result 返回。
     # 相比让 LLM 逐轮 web_read，把 4-6 轮压缩到 2 轮（搜索 + 回答），
