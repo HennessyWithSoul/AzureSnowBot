@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 from nonebot import on_message, on_fullmatch, get_driver, get_bot
+from nonebot.rule import startswith, Rule
 from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Bot
 from nonebot.exception import FinishedException
 from nonebot.log import logger
@@ -262,7 +263,7 @@ async def handle_compact(event: PrivateMessageEvent):
 
 
 # ──────────────────── 主动对话开关指令 ────────────────────
-proactive_cmd = on_message(rule=is_private_event, priority=10, block=False)
+proactive_cmd = on_message(rule=Rule(is_private_event) & startswith("/主动对话"), priority=10, block=True)
 
 
 @proactive_cmd.handle()
@@ -337,7 +338,7 @@ async def handle_help(event: PrivateMessageEvent):
 
 
 # ──────────────────── /白名单 群白名单管理（私聊） ────────────────────
-whitelist_cmd = on_message(rule=is_private_event, priority=10, block=False)
+whitelist_cmd = on_message(rule=Rule(is_private_event) & startswith("/白名单"), priority=10, block=True)
 
 
 @whitelist_cmd.handle()

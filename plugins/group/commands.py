@@ -6,6 +6,7 @@
 
 import re
 from nonebot import on_fullmatch, on_message
+from nonebot.rule import startswith, Rule
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.log import logger
 
@@ -60,7 +61,7 @@ async def handle_group_compact(event: GroupMessageEvent):
 
 
 # ──────────────────── /listen 全量监听切换 ────────────────────
-listen_cmd = on_message(rule=is_group_event, priority=8, block=False)
+listen_cmd = on_message(rule=Rule(is_group_event) & startswith("/listen") & Rule(is_at_bot), priority=8, block=True)
 
 
 @listen_cmd.handle()
@@ -97,7 +98,7 @@ async def handle_listen(event: GroupMessageEvent):
 # ──────────────────── /白名单 群白名单管理 ────────────────────
 # 注意：不做 in_whitelist 检查 —— 否则管理员无法从新群把它加进白名单。
 # 仅管理员可触发，普通群成员（含非白名单群）调用会被拒绝。
-whitelist_cmd = on_message(rule=is_group_event, priority=8, block=False)
+whitelist_cmd = on_message(rule=Rule(is_group_event) & startswith("/白名单") & Rule(is_at_bot), priority=8, block=True)
 
 
 @whitelist_cmd.handle()
@@ -120,7 +121,7 @@ async def handle_whitelist(event: GroupMessageEvent):
 
 
 # ──────────────────── /主动对话 群聊主动发言开关 ────────────────────
-group_proactive_cmd = on_message(rule=is_group_event, priority=8, block=False)
+group_proactive_cmd = on_message(rule=Rule(is_group_event) & startswith("/主动对话") & Rule(is_at_bot), priority=8, block=True)
 
 
 @group_proactive_cmd.handle()
@@ -178,7 +179,7 @@ async def handle_group_proactive(event: GroupMessageEvent):
 
 
 # ──────────────────── /取名 ────────────────────
-nickname_cmd = on_message(rule=is_group_event, priority=9, block=False)
+nickname_cmd = on_message(rule=Rule(is_group_event) & startswith("/取名") & Rule(is_at_bot), priority=9, block=True)
 
 _NICKNAME_TASK = (
     "你是一个取名专家。根据下面的群聊记录，给这个人起 2-3 个有趣的群昵称。"
