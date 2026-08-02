@@ -16,7 +16,7 @@ from nonebot import on_message
 from nonebot.adapters.onebot.v11 import GroupMessageEvent
 from nonebot.log import logger
 
-from .utils import in_whitelist
+from .utils import is_group_event, in_whitelist
 
 CHATLOG_DIR = Path("data/sessions/groups")
 CHATLOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def purge_old_entries(group_id: str) -> int:
 
 # ──────────────────── NoneBot 旁路记录器 ────────────────────
 # priority 较高（数字大=优先级低），block=False 保证不影响其他 handler
-_chatlog_recorder = on_message(priority=1, block=False)
+_chatlog_recorder = on_message(rule=is_group_event, priority=1, block=False)
 
 
 @_chatlog_recorder.handle()

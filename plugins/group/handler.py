@@ -40,13 +40,13 @@ from ..llm import (
 )
 from ..proactive import reset_idle_timer as reset_group_proactive_timer
 from .utils import (
-    in_whitelist, is_at_bot, extract_text,
+    in_whitelist, is_at_bot, extract_text, is_group_event,
     get_reply_id, fetch_quoted_text, fetch_quoted_image_urls, trim_history,
     get_session_lock,
 )
 
 # ──────────────────── 群聊对话处理 ────────────────────
-group_chat = on_message(priority=98, block=False)
+group_chat = on_message(rule=is_group_event, priority=98, block=False)
 
 
 @group_chat.handle()

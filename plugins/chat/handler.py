@@ -42,6 +42,14 @@ from ..llm import (
 )
 ADMIN_NUMBER: str = str(getattr(config, "admin_number", ""))
 
+def is_private_event(event) -> bool:
+    """NoneBot Rule：仅匹配私聊消息事件。
+
+    防止私聊 matcher 吞掉群聊事件（handler 类型不符被 skip 后，
+    block=True 的 matcher 依然会 StopPropagation，导致群聊回复失效）。
+    """
+    return isinstance(event, PrivateMessageEvent)
+
 # 会话目录
 ADMIN_DIR = Path("data/admin")
 ADMIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -221,7 +229,7 @@ def trim_history(messages: list[dict]) -> list[dict]:
 
 
 # ──────────────────── 清除对话指令 ────────────────────
-reset = on_fullmatch("/reset", priority=10, block=True)
+reset = on_fullmatch("/reset", rule=is_private_event, priority=10, block=True)
 
 
 @reset.handle()
@@ -237,7 +245,7 @@ async def handle_reset(event: PrivateMessageEvent):
 
 
 # ──────────────────── 手动压缩指令 ────────────────────
-compact_cmd = on_fullmatch("/compact", priority=10, block=True)
+compact_cmd = on_fullmatch("/compact", rule=is_private_event, priority=10, block=True)
 
 
 @compact_cmd.handle()
@@ -254,7 +262,7 @@ async def handle_compact(event: PrivateMessageEvent):
 
 
 # ──────────────────── 主动对话开关指令 ────────────────────
-proactive_cmd = on_message(priority=10, block=True)
+proactive_cmd = on_message(rule=is_private_event, priority=10, block=True)
 
 
 @proactive_cmd.handle()
@@ -291,7 +299,7 @@ PRIVATE_HELP = """/reset — 清除对话历史
 /主动对话 enable|disable — 切换主动对话（Bot 空闲时主动发消息）
 /help — 显示本帮助"""
 
-help_cmd = on_fullmatch("/help", priority=10, block=True)
+help_cmd = on_fullmatch("/help", rule=is_private_event, priority=10, block=True)
 
 
 @help_cmd.handle()
@@ -303,7 +311,7 @@ async def handle_help(event: PrivateMessageEvent):
 
 
 # ──────────────────── /白名单 群白名单管理（私聊） ────────────────────
-whitelist_cmd = on_message(priority=10, block=True)
+whitelist_cmd = on_message(rule=is_private_event, priority=10, block=True)
 
 
 @whitelist_cmd.handle()
@@ -321,7 +329,7 @@ async def handle_whitelist_private(event: PrivateMessageEvent):
 
 
 # ──────────────────── 主对话处理 ────────────────────
-chat = on_message(priority=99, block=False)
+chat = on_message(rule=is_private_event, priority=99, block=False)
 
 
 @chat.handle()

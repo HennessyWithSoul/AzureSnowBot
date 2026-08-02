@@ -18,10 +18,10 @@ from ..persona.manager import (
 from ..mcp.manager import list_tools_summary
 from ..skill.manager import list_skills_summary
 from ..local_tools.manager import list_tools_summary as local_tools_summary
-from .utils import in_whitelist, is_at_bot
+from .utils import in_whitelist, is_at_bot, is_group_event
 
 # ──────────────────── /reset ────────────────────
-group_reset = on_fullmatch("/reset", priority=10, block=True)
+group_reset = on_fullmatch("/reset", rule=is_group_event, priority=10, block=True)
 
 
 @group_reset.handle()
@@ -36,7 +36,7 @@ async def handle_group_reset(event: GroupMessageEvent):
 
 
 # ──────────────────── /compact ────────────────────
-group_compact = on_fullmatch("/compact", priority=10, block=True)
+group_compact = on_fullmatch("/compact", rule=is_group_event, priority=10, block=True)
 
 
 @group_compact.handle()
@@ -60,7 +60,7 @@ async def handle_group_compact(event: GroupMessageEvent):
 
 
 # ──────────────────── /listen 全量监听切换 ────────────────────
-listen_cmd = on_message(priority=8, block=False)
+listen_cmd = on_message(rule=is_group_event, priority=8, block=False)
 
 
 @listen_cmd.handle()
@@ -97,7 +97,7 @@ async def handle_listen(event: GroupMessageEvent):
 # ──────────────────── /白名单 群白名单管理 ────────────────────
 # 注意：不做 in_whitelist 检查 —— 否则管理员无法从新群把它加进白名单。
 # 仅管理员可触发，普通群成员（含非白名单群）调用会被拒绝。
-whitelist_cmd = on_message(priority=8, block=False)
+whitelist_cmd = on_message(rule=is_group_event, priority=8, block=False)
 
 
 @whitelist_cmd.handle()
@@ -120,7 +120,7 @@ async def handle_whitelist(event: GroupMessageEvent):
 
 
 # ──────────────────── /主动对话 群聊主动发言开关 ────────────────────
-group_proactive_cmd = on_message(priority=8, block=False)
+group_proactive_cmd = on_message(rule=is_group_event, priority=8, block=False)
 
 
 @group_proactive_cmd.handle()
@@ -178,7 +178,7 @@ async def handle_group_proactive(event: GroupMessageEvent):
 
 
 # ──────────────────── /取名 ────────────────────
-nickname_cmd = on_message(priority=9, block=False)
+nickname_cmd = on_message(rule=is_group_event, priority=9, block=False)
 
 _NICKNAME_TASK = (
     "你是一个取名专家。根据下面的群聊记录，给这个人起 2-3 个有趣的群昵称。"
@@ -278,7 +278,7 @@ HELP_TEXT = """/persona — 列出所有人格
 /白名单 list|add <群号>|delete <群号> — 管理群白名单（仅管理员）
 /help — 显示本帮助"""
 
-help_cmd = on_fullmatch("/help", priority=5, block=True)
+help_cmd = on_fullmatch("/help", rule=is_group_event, priority=5, block=True)
 
 
 @help_cmd.handle()

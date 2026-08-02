@@ -12,6 +12,15 @@ from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Bot
 from nonebot.log import logger
 
+
+def is_group_event(event) -> bool:
+    """NoneBot Rule：仅匹配群聊消息事件。
+
+    防止群聊 matcher 吞掉私聊事件（handler 类型不符被 skip 后，
+    block=True 的 matcher 依然会 StopPropagation，导致私聊回复失效）。
+    """
+    return isinstance(event, GroupMessageEvent)
+
 # ──────────────────── 配置 ────────────────────
 config = get_driver().config
 
