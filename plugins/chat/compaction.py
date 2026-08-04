@@ -19,6 +19,7 @@ import httpx
 from nonebot.log import logger
 
 from ..llm import API_KEY, BASE_URL, MODEL
+from ..history_io import load_jsonl_history, rewrite_compacted_history
 
 # ──────────────────── 阈值配置 ────────────────────
 
@@ -257,6 +258,7 @@ def merge_memories_into_file(memory_path: Path, extractions: dict[str, list[str]
     if not extractions:
         return
 
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
 
     # 读取现有内容
@@ -304,13 +306,6 @@ def merge_memories_into_file(memory_path: Path, extractions: dict[str, list[str]
 
 # ──────────────────── 核心 Compaction ────────────────────
 
-def _rewrite_history(session_path: Path, messages: list[dict]) -> None:
-    """用新的消息列表覆盖 JSONL 文件"""
-    with session_path.open("w", encoding="utf-8") as f:
-        for msg in messages:
-            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-
 async def compact_history(
     user_id: str,
     session_path: Path,
@@ -332,14 +327,7 @@ async def compact_history(
     if not session_path.exists():
         return False
 
-    messages: list[dict] = []
-    for line in session_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                messages.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    messages = load_jsonl_history(session_path)
 
     if not messages:
         return False
@@ -382,14 +370,20 @@ async def compact_history(
     }
     new_messages = [summary_msg] + tail_messages
 
-    # Step 4: 重写 JSONL
-    _rewrite_history(session_path, new_messages)
+    # Step 4: 原子重写 JSONL，并保留两次 LLM 调用期间新追加的消息。
+    # 若原历史已被 reset/另一轮 compact 改写，则放弃本轮旧快照，避免覆盖新状态。
+    final_messages = rewrite_compacted_history(session_path, messages, new_messages)
+    if final_messages is None:
+        logger.warning("Compaction: 历史在压缩期间已被修改，放弃写入旧快照")
+        return False
 
-    new_tokens = _estimate_messages_tokens(new_messages)
+    appended_count = len(final_messages) - len(new_messages)
+    new_tokens = _estimate_messages_tokens(final_messages)
     logger.info(
         f"Compaction: 完成 — "
         f"压缩前 {len(messages)} 条 (~{old_tokens + tail_tokens} tokens) → "
-        f"压缩后 {len(new_messages)} 条 (~{new_tokens} tokens), "
+        f"压缩后 {len(final_messages)} 条 (~{new_tokens} tokens), "
+        f"保留压缩期间新增 {appended_count} 条, "
         f"提取记忆 {sum(len(v) for v in extractions.values())} 条"
     )
 
@@ -416,7 +410,7 @@ async def compact_history(
             cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
         else:
             cfg = {}
-        cfg["last_distill_line"] = len(new_messages)
+        cfg["last_distill_line"] = len(final_messages)
         cfg_path.write_text(_json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         logger.debug(f"重置蒸馏水位线失败: {e}")
