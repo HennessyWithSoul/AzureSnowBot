@@ -34,6 +34,7 @@ from ..skill.manager import (
 from ..proactive import reset_idle_timer, cancel_idle_timer
 from .compaction import compact_history, should_compact
 from ..group.utils import fetch_quoted_image_urls
+from ..history_io import append_jsonl_message, clear_jsonl_history, load_jsonl_history
 
 # ──────────────────── 配置 ────────────────────
 config = get_driver().config
@@ -163,26 +164,13 @@ def set_proactive_enabled(enabled: bool) -> None:
 
 def load_history(user_id: str) -> list[dict]:
     """从 JSONL 文件加载对话历史"""
-    path = _session_path(user_id)
-    if not path.exists():
-        return []
-    messages = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                messages.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return messages
+    return load_jsonl_history(_session_path(user_id))
 
 
 def append_message(user_id: str, message: dict) -> None:
     """追加一条消息到 JSONL 文件（更新 config）"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    path = _session_path(user_id)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(message, ensure_ascii=False) + "\n")
+    append_jsonl_message(_session_path(user_id), message)
     # 更新 last_message_at
     cfg = _load_config(user_id)
     cfg["last_message_at"] = now
@@ -191,9 +179,7 @@ def append_message(user_id: str, message: dict) -> None:
 
 def clear_history(user_id: str) -> None:
     """清除用户的对话历史"""
-    path = _session_path(user_id)
-    if path.exists():
-        path.unlink()
+    clear_jsonl_history(_session_path(user_id))
 
 
 # ──────────────────── 时间上下文 ────────────────────

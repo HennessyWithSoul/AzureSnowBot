@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from nonebot.log import logger
 
+from ..history_io import append_jsonl_message, clear_jsonl_history, load_jsonl_history
+
 # ──────────────────── 路径常量 ────────────────────
 GLOBAL_PERSONA_DIR = Path("data/personas")
 GROUP_SESSION_DIR = Path("data/sessions/groups")
@@ -232,18 +234,7 @@ def load_history(group_id: str, persona_name: str | None = None) -> list[dict]:
     """加载指定群 + 人格的对话历史"""
     if persona_name is None:
         persona_name = get_active_persona(group_id)
-    path = _session_path(group_id, persona_name)
-    if not path.exists():
-        return []
-    messages = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                messages.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return messages
+    return load_jsonl_history(_session_path(group_id, persona_name))
 
 
 def append_message(group_id: str, message: dict, persona_name: str | None = None) -> None:
@@ -251,9 +242,7 @@ def append_message(group_id: str, message: dict, persona_name: str | None = None
     if persona_name is None:
         persona_name = get_active_persona(group_id)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    path = _session_path(group_id, persona_name)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(message, ensure_ascii=False) + "\n")
+    append_jsonl_message(_session_path(group_id, persona_name), message)
     # 更新 last_message_at
     config = _load_group_config(group_id)
     config["last_message_at"] = now
@@ -264,6 +253,4 @@ def clear_history(group_id: str, persona_name: str | None = None) -> None:
     """清除指定群 + 人格的对话历史"""
     if persona_name is None:
         persona_name = get_active_persona(group_id)
-    path = _session_path(group_id, persona_name)
-    if path.exists():
-        path.unlink()
+    clear_jsonl_history(_session_path(group_id, persona_name))
