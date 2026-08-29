@@ -20,6 +20,7 @@ key 格式:
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from nonebot import get_bot, get_driver
@@ -49,6 +50,13 @@ IDLE_SECONDS: int = int(getattr(config, "proactive_idle_seconds", 3600))
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 HEARTBEAT_PATH = Path("data/admin/HEARTBEAT.md")
+
+# 模型内联在正文里的思考块（成对的 / 未闭合的）
+_THINK_BLOCK_RE = re.compile(
+    r"<think(?:ing)?\s*>.*?</think(?:ing)?\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_THINK_OPEN_RE = re.compile(r"<think(?:ing)?\s*>", re.IGNORECASE)
 
 # 心跳只保留最近的对话（避免过长历史淹没心跳指令）
 HEARTBEAT_MAX_MESSAGES = 30
@@ -245,8 +253,6 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
         if not get_proactive_enabled():
             return
         history = load_history(ADMIN_NUMBER)
-        if history and history[-1].get("role") != "assistant":
-            return
         trimmed = trim_history(history)
         prompt = load_admin_prompt() or "你是一个有用的助手。"
         cfg = get_config(ADMIN_NUMBER)
@@ -280,9 +286,11 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
         if group_memory:
             persona_prompt += "\n\n" + group_memory
 
+        # 注意：这里不再检查 history 末条是不是 assistant。
+        # 全量监听（/listen on）下所有群消息都会以 role=user 写入历史，
+        # 末条几乎恒为 user，该检查会让群聊心跳永远触发不了。
+        # 防止"Bot 说话时被打断"改由对话入口提前重置计时器来保证（见 handler）。
         history = load_history(target_id, persona)
-        if history and history[-1].get("role") != "assistant":
-            return
         trimmed = group_trim(history, persona_prompt)
 
         prompt = persona_prompt
@@ -318,8 +326,9 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
 
             tool_calls = assistant_msg.get("tool_calls")
             if not tool_calls:
-                # 最终回复
-                reply = (assistant_msg.get("content") or "").strip()
+                # 最终回复。先剥掉内联的思考块，避免把 <think> 标签发给用户
+                # （真正要发的话，标签里的内容本来也不该出现）
+                reply = _strip_thinking(assistant_msg.get("content") or "").strip()
 
                 if _is_heartbeat_ok(reply):
                     logger.debug(f"心跳 [{chat_type}:{target_id}]: LLM 回复 HEARTBEAT_OK，静默")
@@ -410,15 +419,49 @@ async def run_heartbeat(chat_type: str, target_id: str) -> None:
             logger.debug(f"心跳蒸馏跳过: {e}")
 
 
+def _strip_thinking(text: str) -> str:
+    """剥离模型内联在正文里的思考过程。
+
+    部分模型（尤其推理型）会把思考过程直接写进 content，
+    而不是单独的 reasoning_content 字段，表现为正文前面一大段分析、
+    最后才给出结论。心跳判定前必须先剥掉，否则整段思考会被当成主动消息发出去。
+    """
+    if not text:
+        return ""
+
+    # 成对的 <think>...</think> / <thinking>...</thinking>
+    text = _THINK_BLOCK_RE.sub("", text)
+
+    # 未闭合的 <think>（输出被截断时常见）：从开标签处整段截掉
+    opened = _THINK_OPEN_RE.search(text)
+    if opened:
+        text = text[: opened.start()]
+
+    return text.strip()
+
+
 def _is_heartbeat_ok(text: str) -> bool:
-    """检查回复是否为 HEARTBEAT_OK 或无实质内容的短回复（不应发给用户）"""
-    stripped = text.strip().upper()
-    # 兼容 "HEARTBEAT_OK"、"NO"、纯空
-    if stripped in (HEARTBEAT_OK, "NO", ""):
+    """检查回复是否为 HEARTBEAT_OK 或无实质内容（不应发给用户）
+
+    模型有两种"吐思考"的写法，都要覆盖：
+      1. 带 <think> 标签 —— 由 _strip_thinking() 在调用前剥掉
+      2. 不带标签，把思考直接混在正文里，最后才给结论 —— 本函数处理
+
+    第 2 种没法靠结构化剥离，所以判定放宽为"整条消息里出现 HEARTBEAT_OK 就算静默"。
+    宁可偶尔漏发一句，也不能把整段思考过程发到群里。
+    """
+    stripped = _strip_thinking(text).strip()
+    if not stripped:
         return True
-    # 过短的回复大概率是 LLM 延续对话惯性，不是有意义的主动消息
-    if len(stripped) <= 10:
+
+    upper = stripped.upper()
+    if upper in (HEARTBEAT_OK, "NO"):
         return True
+
+    # 思考在前、结论在后（如 "……分析了一通……所以没事 HEARTBEAT_OK"）
+    if HEARTBEAT_OK in upper:
+        return True
+
     return False
 
 

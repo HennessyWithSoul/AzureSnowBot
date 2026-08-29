@@ -109,7 +109,7 @@ Admin 私聊拥有与群聊一致的完整工具链（Skill + 本地工具 + MCP
 | `cancel_reminder` | 取消已设置的提醒（一次性/每日） |
 | `list_reminders` | 查看当前对话的待触发提醒 |
 | `get_group_chat_log` | 检索群聊历史消息（按昵称/QQ号/关键词/时间筛选） |
-| `memory_search` | 语义搜索长期记忆和历史对话（仅 Admin 私聊，Embedding + BM25 混合搜索） |
+| `memory_search` | 语义搜索长期记忆和历史对话（Embedding + BM25 混合搜索）<br>※ 需 provider 支持 `/embeddings`；未配置时返回空且不报错。日常记忆靠 MEMORY.md 注入 system prompt，不依赖此工具 |
 | `run_sub_agent` | 启动独立 Sub-Agent 执行任务（隔离上下文，带工具链） |
 | `run_command` | 执行本地 shell 命令（仅 Admin 私聊，超时 30s） |
 | `get_token_stats` | 查看当日 Token 用量统计和预估费用（仅 Admin 私聊） |
@@ -157,7 +157,7 @@ Admin 私聊对话历史超过 token 阈值时自动压缩：
 - 保留最近 40% 的消息完整，旧消息调用 LLM 生成摘要
 - 压缩时自动提取重要信息写入 `MEMORY.md`（用户偏好、决定、承诺等）
 - 压缩后 `history.jsonl` 被重写为 `[摘要消息] + [保留消息]`
-- 压缩完成后自动刷新记忆向量索引，确保 `memory_search` 可检索最新内容
+- 压缩完成后尝试刷新记忆向量索引（未配置 embedding 模型时静默跳过，不影响主流程）
 - 私聊和群聊均支持自动压缩（群聊按人格隔离压缩）
 
 ### Skill 技能系统（渐进式披露）
@@ -190,7 +190,7 @@ data/skills/<skill-name>/
 | 总览 | Bot 运行状态、今日 Token、活跃群数、最近工具调用 |
 | Token 用量 | 每日趋势折线图、来源分布饼图、费用估算 |
 | 对话浏览器 | Admin 私聊 + 群聊历史分页浏览（气泡视图） |
-| 记忆管理 | 编辑 MEMORY.md（Admin + 各群）、语义搜索、索引状态 |
+| 记忆管理 | 编辑 MEMORY.md（Admin + 各群）、结构化记忆浏览；语义搜索与索引状态需配置 embedding 模型后才可用 |
 | 人格管理 | 查看/创建/编辑/删除人格（通用 + 群私有） |
 | 提醒管理 | 查看/取消提醒 |
 | 技能管理 | 查看/创建/编辑/删除技能 |
@@ -249,8 +249,9 @@ AzureSnowBot/
 │   │   └── scheduler.py           #     asyncio 定时任务 + JSON 持久化
 │   └── mcp/                       #   MCP 工具集成
 │       └── manager.py             #     MCP 服务器连接 + 工具调用
-│   └── memory/                    #   记忆向量索引
-│       └── indexer.py             #     Embedding + BM25 混合搜索 + MMR + 时间衰减
+│   └── memory/                    #   记忆（向量索引 + 结构化蒸馏）
+│       ├── indexer.py             #     Embedding + BM25 混合搜索 + MMR + 时间衰减
+│       └── structured.py          #     小模型蒸馏结构化记忆 → memories.jsonl
 │   └── dashboard/                 #   Web Dashboard
 │       ├── __init__.py            #     NoneBot 启动钩子，挂载 FastAPI 子应用
 │       ├── app.py                 #     FastAPI 实例 + CORS + Rate Limiting

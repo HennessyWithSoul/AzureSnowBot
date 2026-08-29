@@ -87,6 +87,12 @@ async def _handle_group_chat(
 ):
     """群聊对话处理主体（持有会话锁执行）"""
 
+    # 进 Agentic Loop 之前先推后心跳计时器。
+    # 原本只在回复完成后重置，导致跑工具调用的这几十秒里计时器仍是旧的，
+    # 心跳可能插进来，两边并发写同一份历史。提前重置让"Bot 正在忙"这段时间也计入空闲。
+    if get_group_proactive(group_id):
+        reset_group_proactive_timer(f"group:{group_id}")
+
     # 检查是否引用了消息
     quoted_text = ""
     quoted_image_urls: list[str] = []

@@ -123,17 +123,31 @@ async def interpret_cards(
     cards: list[dict],
     question: str = "",
     asker: str = "",
+    history: list[dict] | None = None,
+    history_limit: int = 20,
 ) -> str:
     """调用 LLM 解读牌面，返回解读文本（失败抛异常，由 handler 捕获）。
 
     system_prompt 由调用方按渠道拼好（人格 + 运行时上下文）。
+    history: 最近的对话历史，让解读能结合上下文（占卜的问题常和之前聊的
+             事有关）。只取最后 history_limit 条，避免挤爆上下文。
     """
     from ..llm import call_llm  # 惰性 import：避免 llm.py import-time 副作用
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": build_tarot_user_message(cards, question, asker)},
-    ]
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    for msg in (history or [])[-history_limit:]:
+        role = msg.get("role")
+        content = msg.get("content")
+        # 只取纯文本轮次，跳过 tool / 多模态 content（list）
+        if role in ("user", "assistant") and isinstance(content, str) and content:
+            messages.append({"role": role, "content": content})
+
+    messages.append({
+        "role": "user",
+        "content": build_tarot_user_message(cards, question, asker),
+    })
+
     data = await call_llm(messages, source="tarot")
     return (data["choices"][0]["message"].get("content") or "").strip()
 

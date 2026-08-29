@@ -293,9 +293,10 @@ async def handle_tarot(event: GroupMessageEvent):
     from nonebot import get_bot
     from ..chunker import chunk_text, send_chunked
     bot = get_bot()
-    await send_chunked(bot, event, chunk_text(format_cards(cards) + "\n我来帮你解读一下~"))
+    cards_text = format_cards(cards) + "\n我来帮你解读一下~"
+    await send_chunked(bot, event, chunk_text(cards_text))
 
-    # 第二步：人格 + 运行时上下文 → LLM 解读
+    # 第二步：人格 + 运行时上下文 → LLM 解读（带上最近的群聊上下文）
     group_id = str(event.group_id)
     active_persona = get_active_persona(group_id)
     system_prompt = load_persona_prompt(active_persona, group_id)
@@ -306,9 +307,15 @@ async def handle_tarot(event: GroupMessageEvent):
         chat_type="group", last_message_at=cfg.get("last_message_at", "")
     )
 
+    # 加载本群 + 当前人格的历史，让解读能结合上下文
+    from ..persona.manager import load_history, append_message
+    history = load_history(group_id, active_persona)
+
     asker = event.sender.nickname or str(event.user_id)
     try:
-        reply = await interpret_cards(system_prompt, cards, question, asker)
+        reply = await interpret_cards(
+            system_prompt, cards, question, asker, history=history,
+        )
     except httpx.HTTPStatusError as e:
         logger.error(f"塔罗解读 API 错误: {e.response.status_code} {e.response.text}")
         await tarot_cmd.finish(
@@ -325,6 +332,9 @@ async def handle_tarot(event: GroupMessageEvent):
 
     if reply:
         await send_chunked(bot, event, chunk_text(reply), reply_first=False)
+        # 写回历史：记录这次占卜，否则下次完全不记得抽过什么牌、问过什么
+        append_message(group_id, {"role": "user", "content": f"[{asker}]: {text}"}, active_persona)
+        append_message(group_id, {"role": "assistant", "content": f"{cards_text}\n\n{reply}"}, active_persona)
     else:
         await tarot_cmd.finish(
             MessageSegment.reply(event.message_id) + "嗯……我好像走神了，让我再看一眼牌面。"

@@ -215,12 +215,21 @@ class TestHeartbeatPrivate:
         _mock_llm.call_llm.assert_not_awaited()
         _mock_chunker.send_chunked_raw.assert_not_awaited()
 
-    async def test_history_not_ending_with_assistant_skips(self):
-        """历史最后一条不是 assistant（对话中途）时跳过心跳"""
+    async def test_history_ending_with_user_still_runs(self):
+        """历史末条是 user 时心跳照常执行，不再跳过
+
+        旧实现要求末条必须是 assistant 才执行心跳。全量监听（/listen on）下
+        所有群消息都以 role=user 写入历史，末条几乎恒为 user，心跳永远触发不了。
+
+        注：本文件模块级 mock 的 return_value 会被前面的测试改动且
+        autouse fixture 只 reset_mock() 不还原 return_value，
+        所以这里显式设置自身依赖的状态，避免顺序依赖。
+        """
+        _mock_handler.get_proactive_enabled.return_value = True
         _mock_handler.load_history.return_value = [{"role": "user", "content": "在吗"}]
-        _mock_call_llm("记得喝水哦")
+        _mock_call_llm("记得喝水哦，保重身体呀")
         await proactive.run_heartbeat("private", "373900859")
-        _mock_llm.call_llm.assert_not_awaited()
+        _mock_llm.call_llm.assert_awaited_once()
 
 
 # ══════════════════════════════════════════════════════
@@ -256,11 +265,21 @@ class TestHeartbeatGroup:
         await proactive.run_heartbeat("group", "123")
         _mock_llm.call_llm.assert_not_awaited()
 
-    async def test_group_history_not_ending_with_assistant_skips(self):
+    async def test_group_history_ending_with_user_still_runs(self):
+        """群聊历史末条是 user 时心跳照常执行
+
+        这是 issue #7 的核心：/listen on 下群消息全以 role=user 写入历史，
+        旧实现的末条检查会让群聊主动会话永远触发不了。
+
+        注：显式设置自身依赖的 mock 状态，避免被前面测试污染（同上一个测试）。
+        """
+        _mock_persona.get_group_proactive.return_value = True
+        _mock_persona.load_persona_prompt.return_value = "群人格 prompt"
         _mock_persona.load_history.return_value = [{"role": "user", "content": "有人吗"}]
-        _mock_call_llm("大家今天怎么样？")
+        _mock_call_llm("大家今天怎么样？都还好吗")
         await proactive.run_heartbeat("group", "123")
-        _mock_llm.call_llm.assert_not_awaited()
+        _mock_llm.call_llm.assert_awaited_once()
+        _mock_persona.append_message.assert_called_once()
 
 
 # ══════════════════════════════════════════════════════
@@ -278,3 +297,74 @@ class TestKeyParse:
     def test_unknown_key_raises(self):
         with pytest.raises(ValueError):
             proactive._parse_key("bogus")
+
+
+# ══════════════════════════════════════════════════════
+# 心跳 OK 判定（issue #6：模型把思考过程吐在正文里）
+# ══════════════════════════════════════════════════════
+
+class TestStripThinking:
+
+    def test_no_think_block_unchanged(self):
+        assert proactive._strip_thinking("记得喝水哦") == "记得喝水哦"
+
+    def test_removes_paired_think_block(self):
+        text = "<think>让我想想现在该说点什么……\n好像没什么事</think>在吗大家"
+        assert proactive._strip_thinking(text) == "在吗大家"
+
+    def test_removes_thinking_variant(self):
+        text = "<thinking>分析一下</thinking>今天天气不错"
+        assert proactive._strip_thinking(text) == "今天天气不错"
+
+    def test_removes_unclosed_think_block(self):
+        """输出被截断时 <think> 没闭合，应把开标签之后全截掉"""
+        assert proactive._strip_thinking("前面正常内容<think>然后开始思考") == "前面正常内容"
+
+    def test_case_insensitive(self):
+        assert proactive._strip_thinking("<THINK>思考</THINK>结论") == "结论"
+
+    def test_empty(self):
+        assert proactive._strip_thinking("") == ""
+
+
+class TestIsHeartbeatOk:
+
+    def test_plain_ok(self):
+        assert proactive._is_heartbeat_ok("HEARTBEAT_OK") is True
+
+    def test_lowercase_ok(self):
+        assert proactive._is_heartbeat_ok("heartbeat_ok") is True
+
+    def test_no(self):
+        assert proactive._is_heartbeat_ok("NO") is True
+
+    def test_empty(self):
+        assert proactive._is_heartbeat_ok("") is True
+        assert proactive._is_heartbeat_ok("   ") is True
+
+    def test_normal_message_not_ok(self):
+        assert proactive._is_heartbeat_ok("记得喝水哦，保重身体呀") is False
+
+    def test_think_then_ok(self):
+        """带标签的思考 + 结论 OK → 静默"""
+        text = "<think>检查了一遍，没什么待办的</think>HEARTBEAT_OK"
+        assert proactive._is_heartbeat_ok(text) is True
+
+    def test_bare_thinking_then_ok(self):
+        """issue #6 的真实场景：不带标签，思考直接混在正文里，最后给 OK"""
+        text = (
+            "让我看看现在是什么时候了。晚上十一点，用户应该已经睡了。"
+            "翻了一遍最近的对话，也没什么特别需要跟进的事情。"
+            "那就这样吧。\nHEARTBEAT_OK"
+        )
+        assert proactive._is_heartbeat_ok(text) is True
+
+    def test_bare_thinking_without_ok_is_not_silent(self):
+        """只是把思考吐出来、但没给结论 → 不该被静默吞掉"""
+        text = "让我看看现在是什么时候了。晚上十一点，用户应该已经睡了。"
+        assert proactive._is_heartbeat_ok(text) is False
+
+    def test_short_real_message_not_swallowed(self):
+        """旧的 len<=10 兜底会把正常短主动消息吞掉"""
+        assert proactive._is_heartbeat_ok("在吗大家") is False
+        assert proactive._is_heartbeat_ok("睡了吗") is False

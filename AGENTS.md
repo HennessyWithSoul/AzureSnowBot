@@ -99,7 +99,7 @@ FastAPI 子应用挂载到 NoneBot2 的 ASGI server（共享进程，直接调�
 | 总览 | `/overview` | Bot 状态、今日 Token、活跃群数、最近工具调用 |
 | Token 用量 | `/tokens` | 每日趋势图、来源分布、费用估算 |
 | 对话浏览器 | `/conversations` | Admin 私聊 + 群聊历史分页浏览 |
-| 记忆管理 | `/memory` | 编辑 MEMORY.md（Admin + 各群）、语义搜索、索引状态 |
+| 记忆管理 | `/memory` | 编辑 MEMORY.md（Admin + 各群）、结构化记忆浏览；语义搜索与索引状态需配置 embedding 模型 |
 | 人格管理 | `/personas` | 查看/创建/编辑/删除人格（通用 + 群私有） |
 | 提醒管理 | `/reminders` | 查看/取消提醒 |
 | 技能管理 | `/skills` | 查看/创建/编辑/删除技能 |
@@ -160,8 +160,9 @@ plugins/
 │   └── scheduler.py    #   asyncio 调度 + JSON 持久化
 └── mcp/                # MCP 工具
     └── manager.py      #   MCP 服务器连接 + 工具调用
-├── memory/             # 记忆向量索引
-│   └── indexer.py      #   Embedding + BM25 混合搜索 + MMR + 时间衰减
+├── memory/             # 记忆（向量索引 + 结构化蒸馏）
+│   ├── indexer.py      #   Embedding + BM25 混合搜索 + MMR + 时间衰减（当前未启用，见下）
+│   └── structured.py   #   小模型蒸馏结构化记忆 → memories.jsonl
 ├── dashboard/          # Web Dashboard
 │   ├── __init__.py     #   NoneBot 启动钩子，挂载 FastAPI 子应用
 │   ├── app.py          #   FastAPI 实例 + CORS + Rate Limiting
@@ -249,13 +250,30 @@ spec.loader.exec_module(mod)
 - 安全约束：所有工具均 `admin_only=True`，群聊 LLM 不可见
 - `runtime_context.py` 为私聊注入完整环境信息（OS、Shell、Workspace、Git）
 
-### 3. 长期记忆 RAG（已完成）
+### 3. 长期记忆 RAG（代码在，当前未启用）
 
-**已实现**:
-- `memory_search` 工具：Embedding（Gemini text-embedding-004）+ BM25 混合搜索 + MMR 去重 + 时间衰减
+**架构**（代码保留，随时可启用）:
+- `memory_search` 工具：Embedding + BM25 混合搜索 + MMR 去重 + 时间衰减
 - 向量索引存储为 `.memory_index.json`，同时索引 MEMORY.md 和 history.jsonl
-- Compaction 后自动刷新索引
-- 启动时预热索引（`_warmup_index()`）
+- Compaction 后自动刷新索引（`compaction.py` Step 5）
+- 启动时预热索引（`chat/__init__.py`）
+
+**当前状态：整条链路实际不生效，且这是设计上可接受的**
+
+- `embed_texts()` 走 `{BASE_URL}/embeddings`，而 `.env` 配的是 `LLM_PROVIDER=deepseek`，
+  deepseek 不提供该端点 → 调用失败，被 `ensure_index()` 静默吞掉（返回旧索引）。
+  `token_stats.json` 里 `embedding` 来源从未出现过，可作为佐证。
+- 未配置 embedding 模型时行为是安全的：`_load_index()` 返回空 → `search()` 的
+  `if not chunks: return []`。**不会返回过期内容。**
+- **记忆实际靠注入而非检索**：私聊 `MEMORY.md` 全文进 system prompt
+  （`chat/handler.py` 的 `_ADMIN_CONTEXT_FILES`，无截断）；群聊注入前 3000 字。
+  近期历史在 messages 里，远期历史已被 compaction 压成摘要。**所以不检索也不缺记忆。**
+- 因此 `data/admin/AGENTS.md` 已改为「直接查看 prompt 里的 MEMORY.md，不调用检索工具」，
+  `memory_search` 处于自然废弃状态（代码未删）。
+
+**要启用时**：配一个支持 `/embeddings` 的 provider（如 gemini），
+在 `indexer.py` 的 `_EMBEDDING_MODELS` 里补上对应模型，再把 `data/admin/AGENTS.md`
+的检索指令改回来即可。
 
 ### 4. 图片理解 / 多模态（部分完成）
 
@@ -284,8 +302,8 @@ spec.loader.exec_module(mod)
     更新水位线 last_distill_line = len(history)
 
 读取侧（memory_search 工具）：
-  向量索引 ──→ 同时索引 MEMORY.md + history.jsonl（已有）
-  结构化检索 ──→ 加载 memories.jsonl，按 type/关键词过滤
+  向量索引 ──→ 同时索引 MEMORY.md + history.jsonl（代码已有，当前因未配 embedding 模型不生效）
+  结构化检索 ──→ 加载 memories.jsonl，按 type/关键词过滤（依赖蒸馏，memories.jsonl 目前尚未生成）
 
 System prompt 常驻注入：
   ──→ memories.jsonl 中 type=identity 的少量核心条目
@@ -410,9 +428,14 @@ python -c "import ast; ast.parse(open('plugins/chat/proactive.py', encoding='utf
 ## .gitignore 注意事项
 
 当前未忽略的文件：
-- `.pytest_cache/` — 应该加到 .gitignore
 - `.vscode/` — 看团队约定
-- `good_persona/` — 人格草稿/备份目录，含敏感 prompt 内容
 
 已在 .gitignore 中的：
-- `__pycache__/`, `*.pyc`, `.env`, `vendor/`, `reference/`, `data/sessions`, `data/admin`, `data/private`, `data/reminders.json`
+- `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.pytest_tmp*/`, `.env`, `vendor/`, `reference/`
+- `good_persona/` — 人格草稿/备份目录，含敏感 prompt 内容
+- `data/sessions`, `data/groups`, `data/reminders.json`, `data/tool_calls.jsonl`
+- `data/admin/config.json`, `data/admin/history.jsonl`, `data/admin/SOUL.md`,
+  `data/admin/token_stats.json`, `data/admin/.memory_index.json`, `data/admin/memories.jsonl`
+- `web/node_modules/`, `web/dist/`, `docs/`
+
+> 注：`docs/` 是被忽略的，本 AGENTS.md 因位于仓库根目录才纳入版本控制。

@@ -138,3 +138,398 @@ class TestChunkTextEdge:
             line.strip() for line in text.split("\n") if line.strip()
         )
         assert reassembled == original_stripped
+
+
+# ══════════════════════════════════════════════════════
+# issue #5：去掉字数限制，一个换行 = 一条消息
+# ══════════════════════════════════════════════════════
+
+class TestNoCharLimit:
+
+    def test_long_line_not_split_below_safety_cap(self):
+        """单段 1200 字（超过旧的 200 字限制）不应被切断"""
+        result = chunk_text("字" * 1200)
+        assert result == ["字" * 1200]
+
+    def test_multiple_long_lines_keep_one_chunk_each(self):
+        """每段都在安全上限内时，一条消息 = 一个换行段"""
+        text = ("甲" * 800) + "\n" + ("乙" * 900) + "\n" + ("丙" * 700)
+        result = chunk_text(text)
+        assert len(result) == 3
+        assert result[0] == "甲" * 800
+        assert result[1] == "乙" * 900
+        assert result[2] == "丙" * 700
+
+    def test_realistic_reply_not_shredded(self):
+        """模拟一段真实的多段回复，行数应与换行数一致"""
+        reply = (
+            "关于这个问题，我觉得可以从几个角度来看。\n"
+            "首先是成本方面，现在的方案确实开销比较大，主要还是因为每一轮都要重新拉取全量数据，"
+            "这部分如果加个缓存应该能省下来不少。\n"
+            "其次是稳定性，之前遇到过的几次超时都集中在高峰期。\n"
+            "所以我建议先做缓存，观察一段时间再决定要不要上更重的方案。"
+        )
+        result = chunk_text(reply)
+        assert len(result) == 4
+
+    def test_safety_cap_still_applies_to_absurd_line(self):
+        """安全兜底：单段超过 MAX_CHUNK_CHARS（QQ 单条上限）仍要切，防发送失败"""
+        result = chunk_text("长" * (MAX_CHUNK_CHARS * 2 + 50))
+        assert len(result) == 3
+        assert all(len(c) <= MAX_CHUNK_CHARS for c in result)
+
+
+# ══════════════════════════════════════════════════════
+# 合并转发（分段数达到 FORWARD_THRESHOLD 时）
+# ══════════════════════════════════════════════════════
+
+import asyncio as _asyncio
+import types as _types
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest as _pytest
+
+from plugins.chunker import (
+    FORWARD_THRESHOLD,
+    build_forward_nodes,
+    send_forward,
+    send_chunked,
+    send_chunked_raw,
+    reset_self_nickname_cache,
+)
+
+
+def _fake_bot(nickname="测试Bot", self_id="10001", fail_forward=False):
+    bot = MagicMock()
+    bot.self_id = self_id
+    bot.calls = []
+
+    async def _call_api(api, **kwargs):
+        bot.calls.append((api, kwargs))
+        if api == "get_login_info":
+            return {"user_id": int(self_id), "nickname": nickname}
+        if api in ("send_group_forward_msg", "send_private_forward_msg"):
+            if fail_forward:
+                raise RuntimeError("实现端不支持合并转发")
+            return {"message_id": 1}
+        return {}
+
+    bot.call_api = AsyncMock(side_effect=_call_api)
+    bot.send_group_msg = AsyncMock()
+    bot.send_private_msg = AsyncMock()
+    return bot
+
+
+@_pytest.fixture(autouse=True)
+def _reset_cache():
+    reset_self_nickname_cache()
+    yield
+    reset_self_nickname_cache()
+
+
+class TestBuildForwardNodes:
+
+    def test_node_structure(self):
+        """节点必须是标准格式：type=node + user_id/nickname/content"""
+        nodes = build_forward_nodes(["甲", "乙"], user_id="12345", nickname="阿雪")
+        assert len(nodes) == 2
+        assert nodes[0] == {
+            "type": "node",
+            "data": {"user_id": 12345, "nickname": "阿雪", "content": "甲"},
+        }
+        assert nodes[1]["data"]["content"] == "乙"
+
+    def test_user_id_is_int(self):
+        """NapCat 会 .toString()，但标准类型应是数字"""
+        nodes = build_forward_nodes(["内容"], user_id="999", nickname="n")
+        assert nodes[0]["data"]["user_id"] == 999
+        assert isinstance(nodes[0]["data"]["user_id"], int)
+
+    def test_non_numeric_user_id_falls_back_to_zero(self):
+        nodes = build_forward_nodes(["内容"], user_id="abc", nickname="n")
+        assert nodes[0]["data"]["user_id"] == 0
+
+    def test_empty_chunks(self):
+        assert build_forward_nodes([], user_id=1, nickname="n") == []
+
+
+class TestSendForward:
+
+    def test_group_uses_group_api(self):
+        bot = _fake_bot()
+        ok = _asyncio.run(send_forward(bot, "group", 777, ["a", "b", "c"]))
+        assert ok is True
+        api, kwargs = bot.calls[-1]
+        assert api == "send_group_forward_msg"
+        assert kwargs["group_id"] == 777
+        assert len(kwargs["messages"]) == 3
+
+    def test_private_uses_private_api(self):
+        bot = _fake_bot()
+        ok = _asyncio.run(send_forward(bot, "private", 555, ["a", "b"]))
+        assert ok is True
+        api, kwargs = bot.calls[-1]
+        assert api == "send_private_forward_msg"
+        assert kwargs["user_id"] == 555
+
+    def test_fetches_and_caches_nickname(self):
+        bot = _fake_bot(nickname="阿雪")
+        _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"]))
+        _asyncio.run(send_forward(bot, "group", 1, ["x", "y", "z"]))
+        # get_login_info 只应被调用一次（第二次走缓存）
+        logins = [c for c in bot.calls if c[0] == "get_login_info"]
+        assert len(logins) == 1
+        assert bot.calls[-1][1]["messages"][0]["data"]["nickname"] == "阿雪"
+
+    def test_nickname_falls_back_to_self_id(self):
+        bot = _fake_bot(nickname="")
+        _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"]))
+        assert bot.calls[-1][1]["messages"][0]["data"]["nickname"] == "10001"
+
+    def test_failure_returns_false(self):
+        """扩展 API 不被支持时应返回 False，由调用方回退"""
+        bot = _fake_bot(fail_forward=True)
+        assert _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"])) is False
+        bot.send_group_msg.assert_not_awaited()
+
+    def test_empty_chunks_no_call(self):
+        bot = _fake_bot()
+        assert _asyncio.run(send_forward(bot, "group", 1, [])) is True
+        assert not bot.calls
+
+
+class TestThresholdRouting:
+
+    @_pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch):
+        """去掉人类节奏延迟，避免测试变慢"""
+        import plugins.chunker as ck
+        monkeypatch.setattr(ck, "HUMAN_DELAY_MIN", 0)
+        monkeypatch.setattr(ck, "HUMAN_DELAY_MAX", 0)
+
+    def _event(self, group_id=None):
+        ev = _types.SimpleNamespace(user_id=555, message_id=99)
+        if group_id is not None:
+            ev.group_id = group_id
+        return ev
+
+    def test_below_threshold_sends_one_by_one(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), ["a", "b"]))
+        assert bot.send_group_msg.await_count == 2
+        assert not any(c[0].endswith("forward_msg") for c in bot.calls)
+
+    def test_at_threshold_uses_forward(self):
+        bot = _fake_bot()
+        chunks = ["a", "b", "c"]
+        assert len(chunks) == FORWARD_THRESHOLD
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), chunks))
+        assert bot.send_group_msg.await_count == 0
+        assert bot.calls[-1][0] == "send_group_forward_msg"
+        assert len(bot.calls[-1][1]["messages"]) == 3
+
+    def test_fallback_to_sequential_when_forward_fails(self):
+        bot = _fake_bot(fail_forward=True)
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), ["a", "b", "c", "d"]))
+        assert bot.send_group_msg.await_count == 4
+
+    def test_private_event_routes_to_private_forward(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(), ["a", "b", "c"]))
+        assert bot.calls[-1][0] == "send_private_forward_msg"
+        assert bot.calls[-1][1]["user_id"] == 555
+
+    def test_raw_at_threshold_uses_forward(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked_raw(bot, "group", 7, "甲\n乙\n丙"))
+        assert bot.send_group_msg.await_count == 0
+        assert bot.calls[-1][0] == "send_group_forward_msg"
+
+    def test_raw_below_threshold_sends_one_by_one(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked_raw(bot, "group", 7, "甲\n乙"))
+        assert bot.send_group_msg.await_count == 2
+
+    def test_empty_chunks_no_send(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), []))
+        assert bot.send_group_msg.await_count == 0
+        assert not bot.calls
+
+
+# ══════════════════════════════════════════════════════
+# 合并转发（分段数达到 FORWARD_THRESHOLD 时）
+# ══════════════════════════════════════════════════════
+
+import asyncio as _asyncio
+import types as _types
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest as _pytest
+
+from plugins.chunker import (
+    FORWARD_THRESHOLD,
+    build_forward_nodes,
+    send_forward,
+    send_chunked,
+    send_chunked_raw,
+    reset_self_nickname_cache,
+)
+
+
+def _fake_bot(nickname="测试Bot", self_id="10001", fail_forward=False):
+    bot = MagicMock()
+    bot.self_id = self_id
+    bot.calls = []
+
+    async def _call_api(api, **kwargs):
+        bot.calls.append((api, kwargs))
+        if api == "get_login_info":
+            return {"user_id": int(self_id), "nickname": nickname}
+        if api in ("send_group_forward_msg", "send_private_forward_msg"):
+            if fail_forward:
+                raise RuntimeError("实现端不支持合并转发")
+            return {"message_id": 1}
+        return {}
+
+    bot.call_api = AsyncMock(side_effect=_call_api)
+    bot.send_group_msg = AsyncMock()
+    bot.send_private_msg = AsyncMock()
+    return bot
+
+
+@_pytest.fixture(autouse=True)
+def _reset_cache():
+    reset_self_nickname_cache()
+    yield
+    reset_self_nickname_cache()
+
+
+class TestBuildForwardNodes:
+
+    def test_node_structure(self):
+        """节点必须是标准格式：type=node + user_id/nickname/content"""
+        nodes = build_forward_nodes(["甲", "乙"], user_id="12345", nickname="阿雪")
+        assert len(nodes) == 2
+        assert nodes[0] == {
+            "type": "node",
+            "data": {"user_id": 12345, "nickname": "阿雪", "content": "甲"},
+        }
+        assert nodes[1]["data"]["content"] == "乙"
+
+    def test_user_id_is_int(self):
+        """NapCat 会 .toString()，但标准类型应是数字"""
+        nodes = build_forward_nodes(["内容"], user_id="999", nickname="n")
+        assert nodes[0]["data"]["user_id"] == 999
+        assert isinstance(nodes[0]["data"]["user_id"], int)
+
+    def test_non_numeric_user_id_falls_back_to_zero(self):
+        nodes = build_forward_nodes(["内容"], user_id="abc", nickname="n")
+        assert nodes[0]["data"]["user_id"] == 0
+
+    def test_empty_chunks(self):
+        assert build_forward_nodes([], user_id=1, nickname="n") == []
+
+
+class TestSendForward:
+
+    def test_group_uses_group_api(self):
+        bot = _fake_bot()
+        ok = _asyncio.run(send_forward(bot, "group", 777, ["a", "b", "c"]))
+        assert ok is True
+        api, kwargs = bot.calls[-1]
+        assert api == "send_group_forward_msg"
+        assert kwargs["group_id"] == 777
+        assert len(kwargs["messages"]) == 3
+
+    def test_private_uses_private_api(self):
+        bot = _fake_bot()
+        ok = _asyncio.run(send_forward(bot, "private", 555, ["a", "b"]))
+        assert ok is True
+        api, kwargs = bot.calls[-1]
+        assert api == "send_private_forward_msg"
+        assert kwargs["user_id"] == 555
+
+    def test_fetches_and_caches_nickname(self):
+        bot = _fake_bot(nickname="阿雪")
+        _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"]))
+        _asyncio.run(send_forward(bot, "group", 1, ["x", "y", "z"]))
+        # get_login_info 只应被调用一次（第二次走缓存）
+        logins = [c for c in bot.calls if c[0] == "get_login_info"]
+        assert len(logins) == 1
+        assert bot.calls[-1][1]["messages"][0]["data"]["nickname"] == "阿雪"
+
+    def test_nickname_falls_back_to_self_id(self):
+        bot = _fake_bot(nickname="")
+        _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"]))
+        assert bot.calls[-1][1]["messages"][0]["data"]["nickname"] == "10001"
+
+    def test_failure_returns_false(self):
+        """扩展 API 不被支持时应返回 False，由调用方回退"""
+        bot = _fake_bot(fail_forward=True)
+        assert _asyncio.run(send_forward(bot, "group", 1, ["a", "b", "c"])) is False
+        bot.send_group_msg.assert_not_awaited()
+
+    def test_empty_chunks_no_call(self):
+        bot = _fake_bot()
+        assert _asyncio.run(send_forward(bot, "group", 1, [])) is True
+        assert not bot.calls
+
+
+class TestThresholdRouting:
+
+    @_pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch):
+        """去掉人类节奏延迟，避免测试变慢"""
+        import plugins.chunker as ck
+        monkeypatch.setattr(ck, "HUMAN_DELAY_MIN", 0)
+        monkeypatch.setattr(ck, "HUMAN_DELAY_MAX", 0)
+
+    def _event(self, group_id=None):
+        ev = _types.SimpleNamespace(user_id=555, message_id=99)
+        if group_id is not None:
+            ev.group_id = group_id
+        return ev
+
+    def test_below_threshold_sends_one_by_one(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), ["a", "b"]))
+        assert bot.send_group_msg.await_count == 2
+        assert not any(c[0].endswith("forward_msg") for c in bot.calls)
+
+    def test_at_threshold_uses_forward(self):
+        bot = _fake_bot()
+        chunks = ["a", "b", "c"]
+        assert len(chunks) == FORWARD_THRESHOLD
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), chunks))
+        assert bot.send_group_msg.await_count == 0
+        assert bot.calls[-1][0] == "send_group_forward_msg"
+        assert len(bot.calls[-1][1]["messages"]) == 3
+
+    def test_fallback_to_sequential_when_forward_fails(self):
+        bot = _fake_bot(fail_forward=True)
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), ["a", "b", "c", "d"]))
+        assert bot.send_group_msg.await_count == 4
+
+    def test_private_event_routes_to_private_forward(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(), ["a", "b", "c"]))
+        assert bot.calls[-1][0] == "send_private_forward_msg"
+        assert bot.calls[-1][1]["user_id"] == 555
+
+    def test_raw_at_threshold_uses_forward(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked_raw(bot, "group", 7, "甲\n乙\n丙"))
+        assert bot.send_group_msg.await_count == 0
+        assert bot.calls[-1][0] == "send_group_forward_msg"
+
+    def test_raw_below_threshold_sends_one_by_one(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked_raw(bot, "group", 7, "甲\n乙"))
+        assert bot.send_group_msg.await_count == 2
+
+    def test_empty_chunks_no_send(self):
+        bot = _fake_bot()
+        _asyncio.run(send_chunked(bot, self._event(group_id=7), []))
+        assert bot.send_group_msg.await_count == 0
+        assert not bot.calls

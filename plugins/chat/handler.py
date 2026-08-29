@@ -365,7 +365,8 @@ async def handle_tarot_private(event: PrivateMessageEvent):
 
     # 第一步：先发牌面
     bot = get_bot()
-    await send_chunked(bot, event, chunk_text(format_cards(cards) + "\n我来帮你解读一下~"))
+    cards_text = format_cards(cards) + "\n我来帮你解读一下~"
+    await send_chunked(bot, event, chunk_text(cards_text))
 
     # 第二步：Admin 人格 + 运行时上下文 → LLM 解读（与主 handler 同拼法）
     system_prompt = load_admin_prompt() or _FALLBACK_PROMPT
@@ -377,7 +378,9 @@ async def handle_tarot_private(event: PrivateMessageEvent):
     asker = getattr(event, "sender", None)
     asker = getattr(asker, "nickname", None) or str(event.user_id)
     try:
-        reply = await interpret_cards(system_prompt, cards, question, asker)
+        reply = await interpret_cards(
+            system_prompt, cards, question, asker, history=load_history(user_id),
+        )
     except httpx.HTTPStatusError as e:
         logger.error(f"塔罗解读 API 错误: {e.response.status_code} {e.response.text}")
         await tarot_cmd.finish(
@@ -391,6 +394,9 @@ async def handle_tarot_private(event: PrivateMessageEvent):
 
     if reply:
         await send_chunked(bot, event, chunk_text(reply), reply_first=False)
+        # 写回历史：记录这次占卜，否则下次完全不记得抽过什么牌、问过什么
+        append_message(user_id, {"role": "user", "content": text})
+        append_message(user_id, {"role": "assistant", "content": f"{cards_text}\n\n{reply}"})
     else:
         await tarot_cmd.finish("嗯……我好像走神了，让我再看一眼牌面。")
 
@@ -452,6 +458,10 @@ async def handle_chat(event: PrivateMessageEvent):
     # 仅 Admin 可以私聊
     if not ADMIN_NUMBER or user_id != str(ADMIN_NUMBER):
         await chat.finish("请在群里跟我聊天哦~")
+
+    # 进 Agentic Loop 之前先推后心跳计时器，避免跑工具调用期间心跳插进来
+    # 与主流程并发写同一份历史（与群聊 handler 保持一致）。
+    reset_idle_timer("private")
 
     # 检查是否引用了消息
     quoted_text = ""

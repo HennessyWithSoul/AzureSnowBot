@@ -176,3 +176,57 @@ class TestCommandParsing:
     def test_add_missing_group_id(self):
         reply = utils.handle_whitelist_command("/白名单 add")
         assert "用法" in reply
+
+
+# ──────────────────── list 增强：带全量/主动对话开关 ────────────────────
+
+class TestListWithFlags:
+    """list 每行应带「全量对话」「主动对话」两个开关状态"""
+
+    @pytest.fixture
+    def persona_flags(self, monkeypatch):
+        """注入假的 persona.manager，避免触发真实包并控制开关返回值"""
+        pkg = types.ModuleType("plugins.persona")
+        pkg.__path__ = [str(ROOT / "plugins" / "persona")]
+        monkeypatch.setitem(sys.modules, "plugins.persona", pkg)
+
+        mgr = types.ModuleType("plugins.persona.manager")
+        mgr.get_listen_all = lambda gid: gid == "100"
+        mgr.get_group_proactive = lambda gid: gid == "200"
+        monkeypatch.setitem(sys.modules, "plugins.persona.manager", mgr)
+        return mgr
+
+    def test_shows_both_flags_per_group(self, persona_flags):
+        reply = utils.handle_whitelist_command("/白名单 list")
+        lines = [l for l in reply.splitlines() if l.startswith("- ")]
+        assert len(lines) == 2
+        # 100：全量开、主动关
+        assert lines[0].startswith("- 100")
+        assert "全量对话: 开" in lines[0]
+        assert "主动对话: 关" in lines[0]
+        # 200：全量关、主动开
+        assert lines[1].startswith("- 200")
+        assert "全量对话: 关" in lines[1]
+        assert "主动对话: 开" in lines[1]
+
+    def test_all_flags_off(self, persona_flags):
+        persona_flags.get_listen_all = lambda gid: False
+        persona_flags.get_group_proactive = lambda gid: False
+        reply = utils.handle_whitelist_command("/白名单 list")
+        assert reply.count("全量对话: 关") == 2
+        assert reply.count("主动对话: 关") == 2
+
+    def test_all_flags_on(self, persona_flags):
+        persona_flags.get_listen_all = lambda gid: True
+        persona_flags.get_group_proactive = lambda gid: True
+        reply = utils.handle_whitelist_command("/白名单 list")
+        assert reply.count("全量对话: 开") == 2
+        assert reply.count("主动对话: 开") == 2
+
+    def test_count_header_unchanged(self, persona_flags):
+        reply = utils.handle_whitelist_command("/白名单 list")
+        assert reply.startswith("白名单中的群（2 个）:")
+
+    def test_empty_whitelist_still_short_circuits(self, persona_flags):
+        utils.GROUP_WHITELIST[:] = []
+        assert utils.handle_whitelist_command("/白名单 list") == "白名单为空。"

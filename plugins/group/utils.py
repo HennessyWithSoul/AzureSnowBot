@@ -202,7 +202,15 @@ def handle_whitelist_command(text: str) -> str:
         groups = list_whitelist()
         if not groups:
             return "白名单为空。"
-        return f"白名单中的群（{len(groups)} 个）:\n" + "\n".join(f"- {g}" for g in groups)
+
+        from ..persona.manager import get_listen_all, get_group_proactive
+
+        lines: list[str] = []
+        for g in groups:
+            listen = "开" if get_listen_all(g) else "关"
+            proactive = "开" if get_group_proactive(g) else "关"
+            lines.append(f"- {g}　全量对话: {listen}　主动对话: {proactive}")
+        return f"白名单中的群（{len(groups)} 个）:\n" + "\n".join(lines)
 
     if cmd == "add":
         if not rest:

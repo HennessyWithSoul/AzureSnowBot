@@ -44,7 +44,7 @@ def group_memory_path(group_id: str) -> Path:
 def load_group_memory(group_id: str, max_chars: int = 3000) -> str:
     """加载群长期记忆，格式化为可注入 system prompt 的文本。
 
-    超过 max_chars 截断（完整内容可用 read_file/memory_search 获取）。
+    超过 max_chars 截断（完整内容可用 read_file 获取）。
     文件不存在或为空返回 ""。
     """
     path = group_memory_path(group_id)

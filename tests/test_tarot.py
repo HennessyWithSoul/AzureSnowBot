@@ -298,3 +298,61 @@ class TestTarotTool:
     async def test_call_with_question(self):
         result = await tarot_tool(num=1, question="明天")
         assert "占卜问题：明天" in result
+
+
+# ──────────────────── issue #3：解读时带上对话上下文 ────────────────────
+
+class TestInterpretCardsWithHistory:
+
+    async def test_history_is_injected(self, mock_llm):
+        """传了 history 时，历史消息应排在牌面消息之前"""
+        history = [
+            {"role": "user", "content": "我最近在纠结要不要换工作"},
+            {"role": "assistant", "content": "说说看，是什么让你想换？"},
+        ]
+        await interpret_cards("SYS", draw_cards(1), "我该换吗", "小明", history=history)
+
+        messages = mock_llm.await_args.args[0]
+        roles = [m["role"] for m in messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert messages[1]["content"] == "我最近在纠结要不要换工作"
+        # 最后一条才是牌面
+        assert "求问者：小明" in messages[-1]["content"]
+        assert "占卜问题：我该换吗" in messages[-1]["content"]
+
+    async def test_no_history_keeps_two_messages(self, mock_llm):
+        """不传 history 时行为与改动前一致"""
+        await interpret_cards("SYS", draw_cards(1))
+        messages = mock_llm.await_args.args[0]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+
+    async def test_history_truncated_to_limit(self, mock_llm):
+        """history 只取最后 history_limit 条"""
+        history = [{"role": "user", "content": f"旧消息{i}"} for i in range(50)]
+        await interpret_cards("SYS", draw_cards(1), history=history, history_limit=5)
+        messages = mock_llm.await_args.args[0]
+        # system + 5 条历史 + 牌面 = 7
+        assert len(messages) == 7
+        assert messages[1]["content"] == "旧消息45"
+
+    async def test_skips_tool_and_multimodal_messages(self, mock_llm):
+        """tool 消息和多模态 content（list）应被跳过，只留纯文本轮次"""
+        history = [
+            {"role": "user", "content": "你好"},
+            {"role": "tool", "content": "工具结果"},
+            {"role": "assistant", "content": [{"type": "text", "text": "多模态回复"}]},
+            {"role": "user", "content": "再问一句"},
+        ]
+        await interpret_cards("SYS", draw_cards(1), history=history)
+        messages = mock_llm.await_args.args[0]
+        roles = [m["role"] for m in messages]
+        assert roles == ["system", "user", "user", "user"]
+        assert messages[1]["content"] == "你好"
+        assert messages[2]["content"] == "再问一句"
+
+    async def test_empty_history_noop(self, mock_llm):
+        await interpret_cards("SYS", draw_cards(1), history=[])
+        messages = mock_llm.await_args.args[0]
+        assert len(messages) == 2

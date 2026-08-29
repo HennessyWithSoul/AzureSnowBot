@@ -10,14 +10,24 @@ from ..auth import get_current_user
 router = APIRouter()
 
 ADMIN_MEMORY = Path("data/admin/MEMORY.md")
-GROUPS_DIR = Path("data/sessions/groups")
+
+# 枚举"已知群"用的目录：群只要有过会话就会存在，即使还没产生记忆文件。
+# 注意它和群记忆的存储目录不是同一个 —— 记忆在 data/groups/<群号>/。
+SESSION_DIR = Path("data/sessions/groups")
 
 
 def _memory_path(scope: str) -> Path:
-    """根据 scope 返回 MEMORY.md 路径。scope=admin 或 群号"""
+    """根据 scope 返回 MEMORY.md 路径。scope=admin 或 群号。
+
+    群记忆路径统一走 persona.manager.group_memory_path，与 Bot 侧共用同一份
+    定义（data/groups/<群号>/MEMORY.md）。之前这里写成了
+    data/sessions/groups/<群号>/MEMORY.md，导致 Dashboard 编辑的群记忆
+    存不到 Bot 会读的位置。
+    """
     if scope == "admin":
         return ADMIN_MEMORY
-    return GROUPS_DIR / scope / "MEMORY.md"
+    from ...persona.manager import group_memory_path
+    return group_memory_path(scope)
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -31,16 +41,19 @@ class MemorySearchRequest(BaseModel):
 
 @router.get("/scopes")
 async def list_memory_scopes(_user: str = Depends(get_current_user)):
-    """列举所有可管理的记忆范围"""
+    """列举所有可管理的记忆范围
+
+    群列表从会话目录枚举（有会话的群都列出来，即使还没产生记忆文件），
+    但 exists 标记的是真正的记忆文件位置。
+    """
     scopes = [{"id": "admin", "label": "Admin 私聊", "exists": ADMIN_MEMORY.exists()}]
-    if GROUPS_DIR.is_dir():
-        for gdir in sorted(GROUPS_DIR.iterdir()):
+    if SESSION_DIR.is_dir():
+        for gdir in sorted(SESSION_DIR.iterdir()):
             if gdir.is_dir():
-                mem = gdir / "MEMORY.md"
                 scopes.append({
                     "id": gdir.name,
                     "label": f"群 {gdir.name}",
-                    "exists": mem.exists(),
+                    "exists": _memory_path(gdir.name).exists(),
                 })
     return scopes
 
