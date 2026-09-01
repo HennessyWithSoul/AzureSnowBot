@@ -200,10 +200,30 @@ def set_active_persona(group_id: str, persona_name: str) -> None:
 
 # ──────────────────── 全量监听模式 ────────────────────
 
+def _env_listen_all() -> bool:
+    """读取 .env 的 LISTEN_ALL，作为各群默认值。"""
+    try:
+        from nonebot import get_driver
+        raw = getattr(get_driver().config, "listen_all", False)
+    except Exception:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_listen_all(group_id: str) -> bool:
-    """该群是否开启全量消息读取模式（bot 读取并回应群里所有消息）"""
+    """该群是否开启全量消息读取模式。
+
+    群 config.json 里写过 listen_all 则以它为准（/listen 的覆盖）；
+    否则用 .env 的 LISTEN_ALL（默认 false）。
+    """
     config = _load_group_config(group_id)
-    return bool(config.get("listen_all", False))
+    if "listen_all" in config:
+        return bool(config["listen_all"])
+    return _env_listen_all()
 
 
 def set_listen_all(group_id: str, enabled: bool) -> None:
