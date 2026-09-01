@@ -21,7 +21,7 @@
 | @Bot `/skill reload` | 重新扫描技能目录 |
 | @Bot `/compact` | 压缩对话历史（手动触发） |
 | @Bot `/取名 @某人 [条数]` | 根据聊天记录起群昵称 |
-| @Bot `/listen [on\|off]` | 切换全量上下文模式（仅管理员）：开启后 @Bot 回复时加载全量群聊消息；默认可由 `.env` 的 `LISTEN_ALL` 控制；回复触发始终仅 @Bot |
+| @Bot `/listen [on\|off]` | 切换全量上下文模式（仅管理员）：开启后 @Bot 回复时加载全量群聊消息（默认只加载 @Bot 会话）；回复触发始终仅 @Bot |
 | @Bot `/主动对话 [群号] enable\|disable` | 切换该群主动对话（仅管理员）：开启后 bot 定时主动在群里发言 |
 | @Bot `/白名单 list\|add <群号>\|delete <群号>` | 管理群白名单（仅管理员，任意群可用，无需该群在白名单内） |
 | @Bot `/help` | 显示帮助信息 |
@@ -358,7 +358,6 @@ gemini_api_key=AIzaSyXXXXXXXXXXXXX
 # qwen_api_key=sk-XXXX
 
 GROUP_WHITELIST=["群号1", "群号2"]
-LISTEN_ALL=false
 ADMIN_NUMBER=你的QQ号
 ```
 
@@ -379,7 +378,6 @@ ADMIN_NUMBER=你的QQ号
 | `LLM_MODEL` | （可选）覆盖默认模型名称 | 按 provider 自动选择 |
 | `LLM_BASE_URL` | （可选）覆盖默认接口地址 | 按 provider 自动选择 |
 | `GROUP_WHITELIST` | 允许使用的群号列表（JSON 数组） | `[]`（空 = 不响应任何群） |
-| `LISTEN_ALL` | 白名单群是否默认开启全量上下文（非 @ 群聊也写入人格历史） | `false` |
 | `ADMIN_NUMBER` | 管理员 QQ 号，仅该用户可以私聊 Bot | 空 |
 | `PROACTIVE_IDLE_SECONDS` | Admin 私聊主动发言空闲等待秒数 | `3600`（1 小时） |
 | `DASHBOARD_USER` | Dashboard 登录用户名 | `373900859` |

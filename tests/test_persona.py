@@ -260,10 +260,3 @@ class TestListenAll:
         """不同群的监听开关互不影响"""
         pm.set_listen_all("999", True)
         assert pm.get_listen_all("888") is False
-
-    def test_env_default_when_group_unset(self, isolated_dirs, monkeypatch):
-        """群 config 未写 listen_all 时，跟 .env 的 LISTEN_ALL"""
-        monkeypatch.setattr(pm, "_env_listen_all", lambda: True)
-        assert pm.get_listen_all("999") is True
-        pm.set_listen_all("999", False)
-        assert pm.get_listen_all("999") is False
