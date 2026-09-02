@@ -24,6 +24,7 @@ from ..llm import API_KEY, call_llm
 from ..persona.manager import (
     append_message,
     get_active_persona,
+    get_auto_trigger,
     get_group_config,
     get_group_proactive,
     load_group_memory,
@@ -195,6 +196,8 @@ _chatter = on_message(rule=is_group_event, priority=91, block=False)
 @_chatter.handle()
 async def handle_chatter(bot: Bot, event: GroupMessageEvent):
     if not in_whitelist(event.group_id):
+        return
+    if not get_auto_trigger(str(event.group_id)):
         return
     if event.user_id == event.self_id:
         return
