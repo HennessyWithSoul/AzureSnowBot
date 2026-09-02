@@ -182,9 +182,9 @@ async def handle_group_proactive(event: GroupMessageEvent):
     )
 
 
-# ──────────────────── /打开 /关闭 复读与插话 ────────────────────
+# ──────────────────── /chatter 复读与插话 ────────────────────
 auto_trigger_cmd = on_message(
-    rule=Rule(is_group_event) & (startswith("/打开") | startswith("/关闭")) & Rule(is_at_bot),
+    rule=Rule(is_group_event) & startswith("/chatter") & Rule(is_at_bot),
     priority=8, block=True,
 )
 
@@ -195,7 +195,7 @@ async def handle_auto_trigger(event: GroupMessageEvent):
         return
 
     text = event.get_plaintext().strip()
-    if not (text.startswith("/打开") or text.startswith("/关闭")):
+    if not text.startswith("/chatter"):
         return
     if not is_at_bot(event):
         return
@@ -208,7 +208,18 @@ async def handle_auto_trigger(event: GroupMessageEvent):
         )
 
     group_id = str(event.group_id)
-    enable = text.startswith("/打开")
+    arg = text[len("/chatter"):].strip().lower()
+    if arg in ("on", "开"):
+        enable = True
+    elif arg in ("off", "关"):
+        enable = False
+    elif arg == "":
+        enable = not get_auto_trigger(group_id)
+    else:
+        await auto_trigger_cmd.finish(
+            MessageSegment.reply(event.message_id) + "用法: /chatter [on|off]"
+        )
+
     set_auto_trigger(group_id, enable)
     if enable:
         msg = "已开启：本群会按概率复读和插话。"
@@ -395,8 +406,7 @@ HELP_TEXT = """/persona — 列出所有人格
 /塔罗 [牌数1-5] [问题] — 塔罗占卜（抽牌并解读）
 /reset — 清除当前对话历史
 /listen [on|off] — 切换本群全量上下文（仅管理员；默认看 .env LISTEN_ALL）
-/打开 — 开启本群复读和热闹插话（仅管理员，默认关）
-/关闭 — 关闭本群复读和热闹插话（仅管理员）
+/chatter [on|off] — 开关本群复读和热闹插话（仅管理员，默认关）
 /主动对话 [群号] enable|disable — 切换群的主动对话（仅管理员）
 /白名单 list|add <群号>|delete <群号> — 管理群白名单（仅管理员）
 /help — 显示本帮助"""
