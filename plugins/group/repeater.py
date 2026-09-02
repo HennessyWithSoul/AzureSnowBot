@@ -17,6 +17,7 @@ from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot.log import logger
 
+from ..persona.manager import get_auto_trigger
 from .utils import in_whitelist, is_at_bot, is_group_event
 
 # 太长的内容不当复读（防止跟超长复制粘贴）
@@ -124,6 +125,8 @@ _repeater = on_message(rule=is_group_event, priority=90, block=False)
 @_repeater.handle()
 async def handle_repeat(bot: Bot, event: GroupMessageEvent):
     if not in_whitelist(event.group_id):
+        return
+    if not get_auto_trigger(str(event.group_id)):
         return
     if is_at_bot(event):
         return
